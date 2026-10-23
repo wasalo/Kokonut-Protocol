@@ -3,7 +3,8 @@ mod registry;
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, AccountId, PanicOnDefault};
 pub use registry::{
-    ChainCapabilities, ChainConfig, ChainReference, ExecutionPolicy, Project, SignerBinding,
+    ChainCapabilities, ChainConfig, ChainReference, ExecutionPolicy, ExecutionRequest,
+    ExecutionRequestRecord, ExecutionStatus, GasPolicy, Project, SignerBinding,
 };
 use std::collections::HashSet;
 
@@ -18,6 +19,9 @@ pub struct KokonutProtocolHub {
     active_signers: LookupMap<String, u32>,
     execution_policies: LookupMap<String, ExecutionPolicy>,
     active_execution_policies: LookupMap<String, String>,
+    execution_requests: LookupMap<String, ExecutionRequestRecord>,
+    idempotency_requests: LookupMap<String, String>,
+    execution_approvals: LookupMap<String, bool>,
 }
 
 #[near]
@@ -37,6 +41,9 @@ impl KokonutProtocolHub {
             active_signers: LookupMap::new(vec![0x04]),
             execution_policies: LookupMap::new(vec![0x05]),
             active_execution_policies: LookupMap::new(vec![0x06]),
+            execution_requests: LookupMap::new(vec![0x07]),
+            idempotency_requests: LookupMap::new(vec![0x08]),
+            execution_approvals: LookupMap::new(vec![0x09]),
         }
     }
 
@@ -344,6 +351,7 @@ impl KokonutProtocolHub {
         allowed_operations: Vec<String>,
         allowed_targets: Vec<String>,
         max_value_base_units: String,
+        operators: Vec<AccountId>,
         approvers: Vec<AccountId>,
         approval_threshold: u8,
     ) {
@@ -365,6 +373,10 @@ impl KokonutProtocolHub {
             "policy requires an operation"
         );
         assert!(!allowed_targets.is_empty(), "policy requires a target");
+        assert!(
+            !operators.is_empty(),
+            "policy requires an execution operator"
+        );
         assert!(!approvers.is_empty(), "policy requires an approver");
         assert!(
             approval_threshold > 0 && usize::from(approval_threshold) <= approvers.len(),
@@ -380,6 +392,11 @@ impl KokonutProtocolHub {
             allowed_operations.iter().collect::<HashSet<_>>().len(),
             allowed_operations.len(),
             "duplicate allowed operation"
+        );
+        assert_eq!(
+            operators.iter().collect::<HashSet<_>>().len(),
+            operators.len(),
+            "duplicate execution operator"
         );
         assert_eq!(
             approvers.iter().collect::<HashSet<_>>().len(),
@@ -439,6 +456,7 @@ impl KokonutProtocolHub {
             &allowed_operations,
             &allowed_targets,
             &max_value_base_units,
+            &operators,
             &approvers,
             approval_threshold,
         ))
@@ -451,6 +469,7 @@ impl KokonutProtocolHub {
             allowed_operations,
             allowed_targets,
             max_value_base_units,
+            operators,
             approvers,
             approval_threshold,
             policy_hash: policy_hash.clone(),
@@ -511,6 +530,319 @@ impl KokonutProtocolHub {
                 version,
             ))
             .cloned()
+    }
+
+    pub fn propose_execution(&mut self, request: ExecutionRequest) {
+        assert!(!self.paused, "protocol is paused");
+        assert_eq!(
+            request.protocol_version, "1",
+            "unsupported protocol version"
+        );
+        assert!(
+            registry::is_valid_project_id(&request.request_id),
+            "invalid request ID"
+        );
+        assert!(
+            registry::is_valid_project_id(&request.project_id),
+            "invalid project ID"
+        );
+        assert!(
+            registry::is_valid_operation(&request.operation),
+            "invalid operation identifier"
+        );
+        assert!(
+            registry::is_valid_base_units(&request.value_base_units),
+            "invalid value amount"
+        );
+        assert!(
+            registry::is_valid_base_units(&request.nonce),
+            "invalid nonce"
+        );
+        assert!(
+            registry::is_valid_base_units(&request.gas_policy.max_fee)
+                && registry::is_valid_base_units(&request.gas_policy.max_priority_fee),
+            "invalid gas fee amount"
+        );
+        assert!(
+            registry::base_units_lte(
+                &request.gas_policy.max_priority_fee,
+                &request.gas_policy.max_fee
+            ),
+            "priority fee exceeds max fee"
+        );
+        assert!(
+            registry::is_valid_hash(&request.calldata_hash),
+            "invalid calldata hash"
+        );
+        assert!(
+            !request.idempotency_key.is_empty()
+                && request.idempotency_key.len() <= 256
+                && request
+                    .idempotency_key
+                    .bytes()
+                    .all(|byte| (0x20..=0x7e).contains(&byte)),
+            "invalid idempotency key"
+        );
+        let expires_at_ns = registry::parse_expires_at_ns(&request.expires_at)
+            .unwrap_or_else(|| env::panic_str("invalid RFC 3339 expiration"));
+        assert!(
+            expires_at_ns > env::block_timestamp(),
+            "execution request is expired"
+        );
+        assert!(
+            self.execution_requests.get(&request.request_id).is_none(),
+            "request ID already used"
+        );
+        assert!(
+            self.idempotency_requests
+                .get(&request.idempotency_key)
+                .is_none(),
+            "idempotency key already used"
+        );
+
+        let reference = ChainReference {
+            namespace: request.chain_namespace.clone(),
+            chain_id: request.chain_id.clone(),
+        };
+        let project = self
+            .projects
+            .get(&request.project_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("project not registered"));
+        assert!(project.active, "project is inactive");
+        assert!(
+            project.approved_chains.contains(&reference),
+            "chain is not approved for project"
+        );
+        let chain = self
+            .chains
+            .get(&registry::chain_key(&reference))
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("chain not registered"));
+        assert!(chain.enabled, "chain is disabled");
+        assert!(
+            registry::is_valid_signer_address(&request.target, &chain.family),
+            "invalid target for chain family"
+        );
+
+        let policy = self
+            .get_active_execution_policy(
+                request.project_id.clone(),
+                request.chain_namespace.clone(),
+                request.chain_id.clone(),
+            )
+            .unwrap_or_else(|| env::panic_str("execution policy not configured"));
+        assert_eq!(
+            request.policy_version, policy.version,
+            "request policy version is not active"
+        );
+        let predecessor = env::predecessor_account_id();
+        assert!(
+            policy.operators.contains(&predecessor),
+            "caller is not an execution operator"
+        );
+        assert!(
+            policy.allowed_operations.contains(&request.operation),
+            "operation is not allowed by policy"
+        );
+        assert!(
+            policy.allowed_targets.iter().any(|target| {
+                if chain.family == "evm" {
+                    target.eq_ignore_ascii_case(&request.target)
+                } else {
+                    target == &request.target
+                }
+            }),
+            "target is not allowed by policy"
+        );
+        assert!(
+            registry::base_units_lte(&request.value_base_units, &policy.max_value_base_units),
+            "value exceeds policy limit"
+        );
+
+        let serialized = near_sdk::serde_json::to_vec(&request)
+            .unwrap_or_else(|_| env::panic_str("failed to encode execution request"));
+        let action_hash = registry::hash_to_hex(&env::sha256(&serialized));
+        let record = ExecutionRequestRecord {
+            request: request.clone(),
+            action_hash: action_hash.clone(),
+            policy_hash: policy.policy_hash.clone(),
+            proposer: predecessor,
+            status: ExecutionStatus::AwaitingApproval,
+            approval_count: 0,
+            expires_at_ns,
+        };
+        self.execution_requests
+            .insert(request.request_id.clone(), record);
+        self.idempotency_requests
+            .insert(request.idempotency_key.clone(), request.request_id.clone());
+        self.emit_event(
+            "execution_proposed",
+            near_sdk::serde_json::json!({
+                "request_id": request.request_id,
+                "project_id": request.project_id,
+                "chain_namespace": request.chain_namespace,
+                "chain_id": request.chain_id,
+                "action_hash": action_hash,
+                "policy_hash": policy.policy_hash
+            }),
+        );
+    }
+
+    pub fn approve_execution(&mut self, request_id: String, expected_action_hash: String) {
+        let mut record = self
+            .execution_requests
+            .get(&request_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("execution request not found"));
+        assert_eq!(
+            record.status,
+            ExecutionStatus::AwaitingApproval,
+            "execution request is not awaiting approval"
+        );
+        if env::block_timestamp() >= record.expires_at_ns {
+            record.status = ExecutionStatus::Expired;
+            self.execution_requests.insert(request_id.clone(), record);
+            self.emit_event(
+                "execution_expired",
+                near_sdk::serde_json::json!({ "request_id": request_id }),
+            );
+            return;
+        }
+        assert!(!self.paused, "protocol is paused");
+        assert!(
+            registry::is_valid_hash(&expected_action_hash)
+                && expected_action_hash == record.action_hash,
+            "action hash does not match proposed request"
+        );
+        let reference = ChainReference {
+            namespace: record.request.chain_namespace.clone(),
+            chain_id: record.request.chain_id.clone(),
+        };
+        let project = self
+            .projects
+            .get(&record.request.project_id)
+            .unwrap_or_else(|| env::panic_str("project not registered"));
+        assert!(project.active, "project is inactive");
+        assert!(
+            project.approved_chains.contains(&reference),
+            "chain is not approved for project"
+        );
+        let chain = self
+            .chains
+            .get(&registry::chain_key(&reference))
+            .unwrap_or_else(|| env::panic_str("chain not registered"));
+        assert!(chain.enabled, "chain is disabled");
+        let policy = self
+            .get_active_execution_policy(
+                record.request.project_id.clone(),
+                record.request.chain_namespace.clone(),
+                record.request.chain_id.clone(),
+            )
+            .unwrap_or_else(|| env::panic_str("execution policy not configured"));
+        assert_eq!(
+            policy.version, record.request.policy_version,
+            "request policy version is no longer active"
+        );
+
+        let approver = env::predecessor_account_id();
+        assert_ne!(
+            approver, record.proposer,
+            "proposer cannot approve own request"
+        );
+        assert!(
+            policy.approvers.contains(&approver),
+            "caller is not an approver"
+        );
+        let approval_key = registry::execution_approval_key(&request_id, &approver);
+        assert!(
+            self.execution_approvals.get(&approval_key).is_none(),
+            "approver already voted"
+        );
+        self.execution_approvals.insert(approval_key, true);
+        record.approval_count = record
+            .approval_count
+            .checked_add(1)
+            .unwrap_or_else(|| env::panic_str("approval count overflow"));
+        if record.approval_count >= policy.approval_threshold {
+            record.status = ExecutionStatus::Approved;
+        }
+        self.execution_requests
+            .insert(request_id.clone(), record.clone());
+        self.emit_event(
+            "execution_approved",
+            near_sdk::serde_json::json!({
+                "request_id": request_id,
+                "approver": approver,
+                "action_hash": record.action_hash,
+                "approval_count": record.approval_count,
+                "status": record.status
+            }),
+        );
+    }
+
+    pub fn cancel_execution(&mut self, request_id: String) {
+        let mut record = self
+            .execution_requests
+            .get(&request_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("execution request not found"));
+        let caller = env::predecessor_account_id();
+        assert!(
+            caller == record.proposer || caller == self.administrator,
+            "proposer or administrator only"
+        );
+        if env::block_timestamp() >= record.expires_at_ns {
+            record.status = ExecutionStatus::Expired;
+            self.execution_requests.insert(request_id.clone(), record);
+            self.emit_event(
+                "execution_expired",
+                near_sdk::serde_json::json!({ "request_id": request_id }),
+            );
+            return;
+        }
+        assert!(
+            matches!(
+                record.status,
+                ExecutionStatus::AwaitingApproval | ExecutionStatus::Approved
+            ),
+            "execution request cannot be cancelled"
+        );
+        record.status = ExecutionStatus::Cancelled;
+        self.execution_requests.insert(request_id.clone(), record);
+        self.emit_event(
+            "execution_cancelled",
+            near_sdk::serde_json::json!({ "request_id": request_id, "caller": caller }),
+        );
+    }
+
+    pub fn expire_execution(&mut self, request_id: String) {
+        let mut record = self
+            .execution_requests
+            .get(&request_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("execution request not found"));
+        assert!(
+            matches!(
+                record.status,
+                ExecutionStatus::AwaitingApproval | ExecutionStatus::Approved
+            ),
+            "execution request cannot be expired"
+        );
+        assert!(
+            env::block_timestamp() >= record.expires_at_ns,
+            "execution request has not expired"
+        );
+        record.status = ExecutionStatus::Expired;
+        self.execution_requests.insert(request_id.clone(), record);
+        self.emit_event(
+            "execution_expired",
+            near_sdk::serde_json::json!({ "request_id": request_id }),
+        );
+    }
+
+    pub fn get_execution_request(&self, request_id: String) -> Option<ExecutionRequestRecord> {
+        self.execution_requests.get(&request_id).cloned()
     }
 
     pub fn pause(&mut self) {
@@ -581,6 +913,13 @@ mod tests {
     fn set_predecessor(value: &str) {
         testing_env!(VMContextBuilder::new()
             .predecessor_account_id(account(value))
+            .build());
+    }
+
+    fn set_predecessor_at(value: &str, timestamp_ns: u64) {
+        testing_env!(VMContextBuilder::new()
+            .predecessor_account_id(account(value))
+            .block_timestamp(timestamp_ns)
             .build());
     }
 
@@ -733,9 +1072,449 @@ mod tests {
             vec!["deploy_project_component".to_owned()],
             vec!["0x1234567890abcdef1234567890abcdef12345678".to_owned()],
             "1000000".to_owned(),
-            vec!["alice.near".parse().unwrap(), "bob.near".parse().unwrap()],
+            vec![account("operator.near")],
+            vec![account("alice.near"), account("bob.near")],
             2,
         );
+    }
+
+    fn execution_request(
+        request_id: &str,
+        idempotency_key: &str,
+        expires_at: &str,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            protocol_version: "1".to_owned(),
+            request_id: request_id.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            chain_namespace: "eip155".to_owned(),
+            chain_id: "84532".to_owned(),
+            operation: "deploy_project_component".to_owned(),
+            target: "0x1234567890abcdef1234567890abcdef12345678".to_owned(),
+            value_base_units: "500".to_owned(),
+            calldata_hash: format!("0x{}", "a".repeat(64)),
+            nonce: "0".to_owned(),
+            gas_policy: GasPolicy {
+                max_fee: "10".to_owned(),
+                max_priority_fee: "2".to_owned(),
+            },
+            expires_at: expires_at.to_owned(),
+            policy_version: "policy-v1".to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+        }
+    }
+
+    #[test]
+    fn authorized_operator_can_propose_policy_compliant_execution() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4c";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-deploy-1",
+            "2035-01-01T00:00:00Z",
+        ));
+        let record = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("proposed execution is stored");
+
+        assert_eq!(record.status, ExecutionStatus::AwaitingApproval);
+        assert_eq!(record.proposer, account("operator.near"));
+        assert_eq!(record.approval_count, 0);
+        assert!(registry::is_valid_hash(&record.action_hash));
+    }
+
+    #[test]
+    fn pause_blocks_approvals_for_pending_requests() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-paused-approval",
+            "2035-01-01T00:00:00Z",
+        ));
+        let action_hash = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request exists")
+            .action_hash;
+        set_predecessor(ADMIN);
+        hub.pause();
+        set_predecessor("alice.near");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.approve_execution(request_id.to_owned(), action_hash)
+        }));
+
+        assert!(result.is_err());
+        let pending = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request remains pending");
+        assert_eq!(pending.approval_count, 0);
+        assert_eq!(pending.status, ExecutionStatus::AwaitingApproval);
+    }
+
+    #[test]
+    fn approval_is_rejected_after_active_policy_version_changes() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-old-policy",
+            "2035-01-01T00:00:00Z",
+        ));
+        let action_hash = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request exists")
+            .action_hash;
+        set_predecessor(ADMIN);
+        configure_execution_policy(&mut hub, "policy-v2");
+        set_predecessor("alice.near");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.approve_execution(request_id.to_owned(), action_hash)
+        }));
+
+        assert!(result.is_err());
+        let unchanged = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request remains auditable");
+        assert_eq!(unchanged.status, ExecutionStatus::AwaitingApproval);
+        assert_eq!(unchanged.approval_count, 0);
+    }
+
+    #[test]
+    fn execution_proposer_cannot_approve_own_request() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        hub.configure_execution_policy(
+            PROJECT_ID.to_owned(),
+            "eip155".to_owned(),
+            "84532".to_owned(),
+            "policy-v1".to_owned(),
+            vec!["deploy_project_component".to_owned()],
+            vec!["0x1234567890abcdef1234567890abcdef12345678".to_owned()],
+            "1000000".to_owned(),
+            vec![account("alice.near")],
+            vec![account("alice.near"), account("bob.near")],
+            1,
+        );
+        set_predecessor("alice.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-self-approval",
+            "2035-01-01T00:00:00Z",
+        ));
+        let action_hash = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request exists")
+            .action_hash;
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.approve_execution(request_id.to_owned(), action_hash)
+        }));
+
+        assert!(result.is_err());
+        let pending = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request remains pending");
+        assert_eq!(pending.approval_count, 0);
+        assert_eq!(pending.status, ExecutionStatus::AwaitingApproval);
+    }
+
+    #[test]
+    fn approval_binds_the_action_hash_and_requires_distinct_quorum() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4d";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-deploy-2",
+            "2035-01-01T00:00:00Z",
+        ));
+        let action_hash = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("execution request exists")
+            .action_hash;
+
+        set_predecessor("alice.near");
+        let wrong_hash = catch_unwind(AssertUnwindSafe(|| {
+            hub.approve_execution(
+                request_id.to_owned(),
+                "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            )
+        }));
+        assert!(wrong_hash.is_err());
+        hub.approve_execution(request_id.to_owned(), action_hash.clone());
+        let after_first = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("execution request remains stored");
+        let duplicate_vote = catch_unwind(AssertUnwindSafe(|| {
+            hub.approve_execution(request_id.to_owned(), action_hash.clone())
+        }));
+
+        assert!(duplicate_vote.is_err());
+        assert_eq!(after_first.approval_count, 1);
+        assert_eq!(after_first.status, ExecutionStatus::AwaitingApproval);
+
+        set_predecessor("bob.near");
+        hub.approve_execution(request_id.to_owned(), action_hash);
+        let approved = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("execution request remains stored");
+        assert_eq!(approved.approval_count, 2);
+        assert_eq!(approved.status, ExecutionStatus::Approved);
+    }
+
+    #[test]
+    fn duplicate_execution_request_id_is_rejected() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4d";
+        let request = execution_request(request_id, "idem-deploy-replay", "2035-01-01T00:00:00Z");
+        hub.propose_execution(request.clone());
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn duplicate_execution_idempotency_key_is_rejected() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        hub.propose_execution(execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4d",
+            "idem-deploy-replay",
+            "2035-01-01T00:00:00Z",
+        ));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.propose_execution(execution_request(
+                "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+                "idem-deploy-replay",
+                "2035-01-01T00:00:00Z",
+            ))
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn inactive_project_cannot_propose_execution() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        hub.set_project_status(PROJECT_ID.to_owned(), false);
+        set_predecessor("operator.near");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.propose_execution(execution_request(
+                "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+                "idem-inactive-project",
+                "2035-01-01T00:00:00Z",
+            ))
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn disabled_chain_cannot_accept_execution_proposal() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        hub.set_chain_enabled("eip155".to_owned(), "84532".to_owned(), false);
+        set_predecessor("operator.near");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.propose_execution(execution_request(
+                "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+                "idem-disabled-chain",
+                "2035-01-01T00:00:00Z",
+            ))
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn non_operator_cannot_propose_execution() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor(STRANGER);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.propose_execution(execution_request(
+                "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+                "idem-unauthorized",
+                "2035-01-01T00:00:00Z",
+            ))
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_proposal_rejects_priority_fee_above_max_fee() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+            "idem-invalid-fees",
+            "2035-01-01T00:00:00Z",
+        );
+        request.gas_policy.max_priority_fee = "11".to_owned();
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_proposal_rejects_value_above_policy_cap() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+            "idem-over-cap",
+            "2035-01-01T00:00:00Z",
+        );
+        request.value_base_units = "1000001".to_owned();
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_proposal_rejects_target_outside_policy_allowlist() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4f",
+            "idem-wrong-target",
+            "2035-01-01T00:00:00Z",
+        );
+        request.target = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned();
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn paused_protocol_rejects_execution_proposals() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        hub.pause();
+        set_predecessor("operator.near");
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.propose_execution(execution_request(
+                "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+                "idem-paused",
+                "2035-01-01T00:00:00Z",
+            ))
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expired_request_transitions_to_expired_instead_of_accepting_approval() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-expired",
+            "1970-01-01T00:00:00.000000001Z",
+        ));
+        let action_hash = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request exists before expiry")
+            .action_hash;
+        set_predecessor_at("alice.near", 1);
+        hub.approve_execution(request_id.to_owned(), action_hash);
+
+        let expired = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("expired request remains auditable");
+        assert_eq!(expired.status, ExecutionStatus::Expired);
+        assert_eq!(expired.approval_count, 0);
+    }
+
+    #[test]
+    fn expired_request_cannot_be_cancelled_as_if_still_pending() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4f";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-expired-cancel",
+            "1970-01-01T00:00:00.000000001Z",
+        ));
+        set_predecessor_at("operator.near", 1);
+        hub.cancel_execution(request_id.to_owned());
+
+        let expired = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("expired request remains auditable");
+        assert_eq!(expired.status, ExecutionStatus::Expired);
+    }
+
+    #[test]
+    fn only_proposer_or_administrator_can_cancel_execution() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e";
+        hub.propose_execution(execution_request(
+            request_id,
+            "idem-cancel",
+            "2035-01-01T00:00:00Z",
+        ));
+        set_predecessor(STRANGER);
+        let unauthorized = catch_unwind(AssertUnwindSafe(|| {
+            hub.cancel_execution(request_id.to_owned())
+        }));
+        assert!(unauthorized.is_err());
+        set_predecessor("operator.near");
+        hub.cancel_execution(request_id.to_owned());
+
+        let cancelled = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("cancelled request remains auditable");
+        assert_eq!(cancelled.status, ExecutionStatus::Cancelled);
     }
 
     #[test]
@@ -755,6 +1534,7 @@ mod tests {
         assert_eq!(policy.version, "policy-v1");
         assert_eq!(policy.approval_threshold, 2);
         assert_eq!(policy.approvers.len(), 2);
+        assert_eq!(policy.operators, vec![account("operator.near")]);
         assert_eq!(policy.max_value_base_units, "1000000");
         assert!(registry::is_valid_hash(&policy.policy_hash));
     }
@@ -773,6 +1553,7 @@ mod tests {
                 vec!["deploy_project_component".to_owned()],
                 vec!["0x1234567890abcdef1234567890abcdef12345678".to_owned()],
                 "1000000".to_owned(),
+                vec![account("operator.near")],
                 vec![account("alice.near")],
                 2,
             )
@@ -795,6 +1576,7 @@ mod tests {
                 vec!["deploy_project_component".to_owned()],
                 vec!["not-an-evm-address".to_owned()],
                 "1000000".to_owned(),
+                vec![account("operator.near")],
                 vec![account("alice.near")],
                 1,
             )

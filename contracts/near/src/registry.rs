@@ -58,9 +58,57 @@ pub struct ExecutionPolicy {
     pub allowed_operations: Vec<String>,
     pub allowed_targets: Vec<String>,
     pub max_value_base_units: String,
+    pub operators: Vec<AccountId>,
     pub approvers: Vec<AccountId>,
     pub approval_threshold: u8,
     pub policy_hash: String,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GasPolicy {
+    pub max_fee: String,
+    pub max_priority_fee: String,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionRequest {
+    pub protocol_version: String,
+    pub request_id: String,
+    pub project_id: String,
+    pub chain_namespace: String,
+    pub chain_id: String,
+    pub operation: String,
+    pub target: String,
+    pub value_base_units: String,
+    pub calldata_hash: String,
+    pub nonce: String,
+    pub gas_policy: GasPolicy,
+    pub expires_at: String,
+    pub policy_version: String,
+    pub idempotency_key: String,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExecutionStatus {
+    AwaitingApproval,
+    Approved,
+    Expired,
+    Cancelled,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionRequestRecord {
+    pub request: ExecutionRequest,
+    pub action_hash: String,
+    pub policy_hash: String,
+    pub proposer: AccountId,
+    pub status: ExecutionStatus,
+    pub approval_count: u8,
+    pub expires_at_ns: u64,
 }
 
 pub(crate) fn validate_chain(reference: &ChainReference, family: &str, signing_scheme: &str) {
@@ -243,6 +291,27 @@ pub(crate) fn is_valid_base_units(value: &str) -> bool {
     value.len() < UINT256_MAX.len() || value <= UINT256_MAX
 }
 
+pub(crate) fn base_units_lte(left: &str, right: &str) -> bool {
+    is_valid_base_units(left)
+        && is_valid_base_units(right)
+        && (left.len() < right.len() || (left.len() == right.len() && left <= right))
+}
+
+pub(crate) fn parse_expires_at_ns(value: &str) -> Option<u64> {
+    if value.len() > 64 {
+        return None;
+    }
+    let timestamp =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .ok()?
+            .unix_timestamp_nanos();
+    u64::try_from(timestamp).ok()
+}
+
+pub(crate) fn execution_approval_key(request_id: &str, approver: &AccountId) -> String {
+    format!("{request_id}:{approver}")
+}
+
 pub(crate) fn hash_to_hex(hash: &[u8]) -> String {
     let mut output = String::with_capacity(2 + hash.len() * 2);
     output.push_str("0x");
@@ -256,6 +325,18 @@ pub(crate) fn hash_to_hex(hash: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_request_json_example_deserializes_to_contract_input() {
+        let request: ExecutionRequest = near_sdk::serde_json::from_str(include_str!(
+            "../../../specs/examples/execution-request.json"
+        ))
+        .expect("schema example matches contract request type");
+
+        assert_eq!(request.protocol_version, "1");
+        assert_eq!(request.chain_namespace, "eip155");
+        assert_eq!(request.gas_policy.max_fee, "1000000000");
+    }
 
     #[test]
     fn base_unit_values_are_canonical_uint256_decimals() {
@@ -279,6 +360,32 @@ mod tests {
         assert!(is_valid_operation("deploy_project_component"));
         assert!(!is_valid_operation("DeployProject"));
         assert!(!is_valid_operation("deploy-project"));
+    }
+
+    #[test]
+    fn base_unit_comparison_is_numeric_for_canonical_decimal_strings() {
+        assert!(base_units_lte("0", "0"));
+        assert!(base_units_lte("9", "10"));
+        assert!(base_units_lte("100", "100"));
+        assert!(!base_units_lte("10", "9"));
+        assert!(!base_units_lte("01", "10"));
+    }
+
+    #[test]
+    fn expiration_parser_accepts_rfc3339_and_rejects_invalid_or_pre_epoch_values() {
+        assert!(parse_expires_at_ns("2035-01-01T00:00:00Z").is_some());
+        assert!(parse_expires_at_ns("2035-01-01T01:00:00+01:00").is_some());
+        assert!(parse_expires_at_ns("not-a-timestamp").is_none());
+        assert!(parse_expires_at_ns("1969-12-31T23:59:59Z").is_none());
+    }
+
+    #[test]
+    fn approval_keys_include_request_and_approver() {
+        let alice = "alice.near".parse().unwrap();
+        assert_eq!(
+            execution_approval_key("request-1", &alice),
+            "request-1:alice.near"
+        );
     }
 
     #[test]

@@ -1148,6 +1148,7 @@ name = "kokonut-protocol-near"
 version = "0.1.0"
 dependencies = [
  "near-sdk",
+ "time",
 ]
 
 [[package]]
