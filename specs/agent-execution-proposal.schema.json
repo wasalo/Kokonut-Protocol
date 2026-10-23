@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kokonut.network/protocol/specs/agent-execution-proposal.schema.json",
+  "title": "Kokonut Protocol Agent Execution Proposal",
+  "description": "A proposal for independent human review. This object is not approval or authorization to execute.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proposal_version",
+    "proposal_id",
+    "proposed_by",
+    "created_at",
+    "execution_request",
+    "rationale"
+  ],
+  "properties": {
+    "proposal_version": { "const": "1" },
+    "proposal_id": { "type": "string", "format": "uuid" },
+    "proposed_by": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "execution_request": { "$ref": "execution-request.schema.json" },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 }
+  }
+}
