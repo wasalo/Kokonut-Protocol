@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kokonut.network/protocol/specs/execution-request.schema.json",
+  "title": "Kokonut Protocol Execution Request",
+  "description": "A chain-qualified commitment to one proposed destination-chain action. Approval and execution status are recorded separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_id",
+    "project_id",
+    "chain_namespace",
+    "chain_id",
+    "operation",
+    "target",
+    "value_base_units",
+    "calldata_hash",
+    "nonce",
+    "gas_policy",
+    "expires_at",
+    "policy_version",
+    "idempotency_key"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "request_id": { "type": "string", "format": "uuid" },
+    "project_id": { "type": "string", "format": "uuid" },
+    "chain_namespace": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "chain_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "operation": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 80 },
+    "target": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "value_base_units": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "calldata_hash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
+    "nonce": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "gas_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_fee", "max_priority_fee"],
+      "properties": {
+        "max_fee": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+        "max_priority_fee": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }
+      }
+    },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "chain_namespace": { "const": "eip155" } }, "required": ["chain_namespace"] },
+      "then": {
+        "properties": {
+          "chain_id": { "pattern": "^[1-9][0-9]*$" },
+          "target": { "pattern": "^0x[0-9a-fA-F]{40}$" }
+        }
+      }
+    }
+  ]
+}

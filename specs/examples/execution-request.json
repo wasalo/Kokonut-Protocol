@@ -1,0 +1,19 @@
+{
+  "protocol_version": "1",
+  "request_id": "018f4f7e-10bd-7d98-9b23-9ec89a1d9c3a",
+  "project_id": "018f4f7e-10bd-7d98-9b23-9ec89a1d9c3b",
+  "chain_namespace": "eip155",
+  "chain_id": "84532",
+  "operation": "deploy_project_component",
+  "target": "0x1234567890abcdef1234567890abcdef12345678",
+  "value_base_units": "0",
+  "calldata_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "nonce": "0",
+  "gas_policy": {
+    "max_fee": "1000000000",
+    "max_priority_fee": "1000000"
+  },
+  "expires_at": "2026-10-24T12:00:00Z",
+  "policy_version": "protocol-policy-v1",
+  "idempotency_key": "deploy-project-001"
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kokonut.network/protocol/specs/deployment-profile.schema.json",
+  "title": "Kokonut Protocol Deployment Profile",
+  "description": "Versioned declaration of a project's approved destination networks and signer derivation policy. Approval immutability is enforced by the owning registry, not by JSON Schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "project_id", "version", "config_hash", "status", "config"],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "project_id": { "type": "string", "format": "uuid" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "config_hash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
+    "status": { "enum": ["draft", "proposed", "approved", "retired"] },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved_chains", "signer_derivation_policy"],
+      "properties": {
+        "approved_chains": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/chain_reference" }
+        },
+        "signer_derivation_policy": { "$ref": "#/$defs/signer_derivation_policy" }
+      }
+    }
+  },
+  "$defs": {
+    "chain_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "chain_id"],
+      "properties": {
+        "namespace": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "chain_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "namespace": { "const": "eip155" } }, "required": ["namespace"] },
+          "then": { "properties": { "chain_id": { "pattern": "^[1-9][0-9]*$" } } }
+        }
+      ]
+    },
+    "signer_derivation_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path_template", "allowed_purposes"],
+      "properties": {
+        "path_template": {
+          "type": "string",
+          "pattern": "^.+[{]project_id[}].+[{]chain_namespace[}].+[{]chain_id[}].+[{]purpose[}]$"
+        },
+        "allowed_purposes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["deployer", "operator", "settlement"] }
+        }
+      }
+    }
+  }
+}

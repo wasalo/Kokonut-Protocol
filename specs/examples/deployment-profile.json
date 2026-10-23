@@ -1,0 +1,17 @@
+{
+  "protocol_version": "1",
+  "project_id": "018f4f7e-10bd-7d98-9b23-9ec89a1d9c3b",
+  "version": "1.0.0",
+  "config_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "status": "proposed",
+  "config": {
+    "approved_chains": [
+      { "namespace": "near", "chain_id": "testnet" },
+      { "namespace": "eip155", "chain_id": "84532" }
+    ],
+    "signer_derivation_policy": {
+      "path_template": "kokonut/v1/project/{project_id}/{chain_namespace}/{chain_id}/{purpose}",
+      "allowed_purposes": ["deployer", "operator", "settlement"]
+    }
+  }
+}
