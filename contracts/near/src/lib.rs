@@ -2,7 +2,9 @@ mod registry;
 
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, AccountId, PanicOnDefault};
-pub use registry::{ChainCapabilities, ChainConfig, ChainReference, Project, SignerBinding};
+pub use registry::{
+    ChainCapabilities, ChainConfig, ChainReference, ExecutionPolicy, Project, SignerBinding,
+};
 use std::collections::HashSet;
 
 #[near(contract_state)]
@@ -14,6 +16,8 @@ pub struct KokonutProtocolHub {
     projects: LookupMap<String, Project>,
     signer_bindings: LookupMap<String, SignerBinding>,
     active_signers: LookupMap<String, u32>,
+    execution_policies: LookupMap<String, ExecutionPolicy>,
+    active_execution_policies: LookupMap<String, String>,
 }
 
 #[near]
@@ -31,6 +35,8 @@ impl KokonutProtocolHub {
             projects: LookupMap::new(vec![0x02]),
             signer_bindings: LookupMap::new(vec![0x03]),
             active_signers: LookupMap::new(vec![0x04]),
+            execution_policies: LookupMap::new(vec![0x05]),
+            active_execution_policies: LookupMap::new(vec![0x06]),
         }
     }
 
@@ -329,6 +335,184 @@ impl KokonutProtocolHub {
             .cloned()
     }
 
+    pub fn configure_execution_policy(
+        &mut self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+        version: String,
+        allowed_operations: Vec<String>,
+        allowed_targets: Vec<String>,
+        max_value_base_units: String,
+        approvers: Vec<AccountId>,
+        approval_threshold: u8,
+    ) {
+        self.assert_administrator();
+        assert!(
+            registry::is_valid_project_id(&project_id),
+            "invalid project ID"
+        );
+        assert!(
+            registry::is_valid_policy_version(&version),
+            "invalid policy version"
+        );
+        assert!(
+            registry::is_valid_base_units(&max_value_base_units),
+            "max value must be a canonical uint256 decimal"
+        );
+        assert!(
+            !allowed_operations.is_empty(),
+            "policy requires an operation"
+        );
+        assert!(!allowed_targets.is_empty(), "policy requires a target");
+        assert!(!approvers.is_empty(), "policy requires an approver");
+        assert!(
+            approval_threshold > 0 && usize::from(approval_threshold) <= approvers.len(),
+            "approval threshold must be within approver count"
+        );
+        assert!(
+            allowed_operations
+                .iter()
+                .all(|value| registry::is_valid_operation(value)),
+            "invalid operation identifier"
+        );
+        assert_eq!(
+            allowed_operations.iter().collect::<HashSet<_>>().len(),
+            allowed_operations.len(),
+            "duplicate allowed operation"
+        );
+        assert_eq!(
+            approvers.iter().collect::<HashSet<_>>().len(),
+            approvers.len(),
+            "duplicate approver"
+        );
+
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        let project = self
+            .projects
+            .get(&project_id)
+            .unwrap_or_else(|| env::panic_str("project not registered"));
+        assert!(project.active, "project is inactive");
+        assert!(
+            project.approved_chains.contains(&reference),
+            "chain is not approved for project"
+        );
+        let chain = self
+            .chains
+            .get(&registry::chain_key(&reference))
+            .unwrap_or_else(|| env::panic_str("chain not registered"));
+        assert!(chain.enabled, "chain is disabled");
+        assert!(
+            allowed_targets
+                .iter()
+                .all(|target| registry::is_valid_signer_address(target, &chain.family)),
+            "invalid target for chain family"
+        );
+        let normalized_targets: HashSet<String> = allowed_targets
+            .iter()
+            .map(|target| {
+                if chain.family == "evm" {
+                    target.to_ascii_lowercase()
+                } else {
+                    target.clone()
+                }
+            })
+            .collect();
+        assert_eq!(
+            normalized_targets.len(),
+            allowed_targets.len(),
+            "duplicate allowed target"
+        );
+
+        let policy_key = registry::execution_policy_key(&project_id, &reference, &version);
+        assert!(
+            self.execution_policies.get(&policy_key).is_none(),
+            "policy version already registered"
+        );
+        let hash_input = near_sdk::serde_json::to_vec(&(
+            &project_id,
+            &reference,
+            &version,
+            &allowed_operations,
+            &allowed_targets,
+            &max_value_base_units,
+            &approvers,
+            approval_threshold,
+        ))
+        .unwrap_or_else(|_| env::panic_str("failed to encode policy commitment"));
+        let policy_hash = registry::hash_to_hex(&env::sha256(&hash_input));
+        let policy = ExecutionPolicy {
+            project_id: project_id.clone(),
+            chain: reference.clone(),
+            version: version.clone(),
+            allowed_operations,
+            allowed_targets,
+            max_value_base_units,
+            approvers,
+            approval_threshold,
+            policy_hash: policy_hash.clone(),
+        };
+        self.execution_policies.insert(policy_key, policy);
+        self.active_execution_policies.insert(
+            registry::execution_policy_scope_key(&project_id, &reference),
+            version.clone(),
+        );
+        self.emit_event(
+            "execution_policy_activated",
+            near_sdk::serde_json::json!({
+                "project_id": project_id,
+                "chain": reference,
+                "version": version,
+                "policy_hash": policy_hash,
+                "approval_threshold": approval_threshold
+            }),
+        );
+    }
+
+    pub fn get_execution_policy(
+        &self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+        version: String,
+    ) -> Option<ExecutionPolicy> {
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        self.execution_policies
+            .get(&registry::execution_policy_key(
+                &project_id,
+                &reference,
+                &version,
+            ))
+            .cloned()
+    }
+
+    pub fn get_active_execution_policy(
+        &self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+    ) -> Option<ExecutionPolicy> {
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        let scope_key = registry::execution_policy_scope_key(&project_id, &reference);
+        let version = self.active_execution_policies.get(&scope_key)?;
+        self.execution_policies
+            .get(&registry::execution_policy_key(
+                &project_id,
+                &reference,
+                version,
+            ))
+            .cloned()
+    }
+
     pub fn pause(&mut self) {
         self.assert_administrator();
         self.paused = true;
@@ -538,6 +722,137 @@ mod tests {
             address.to_owned(),
             key_version,
         );
+    }
+
+    fn configure_execution_policy(hub: &mut KokonutProtocolHub, version: &str) {
+        hub.configure_execution_policy(
+            PROJECT_ID.to_owned(),
+            "eip155".to_owned(),
+            "84532".to_owned(),
+            version.to_owned(),
+            vec!["deploy_project_component".to_owned()],
+            vec!["0x1234567890abcdef1234567890abcdef12345678".to_owned()],
+            "1000000".to_owned(),
+            vec!["alice.near".parse().unwrap(), "bob.near".parse().unwrap()],
+            2,
+        );
+    }
+
+    #[test]
+    fn administrator_can_create_and_activate_a_versioned_execution_policy() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+
+        let policy = hub
+            .get_active_execution_policy(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+            )
+            .expect("configured policy is active");
+
+        assert_eq!(policy.version, "policy-v1");
+        assert_eq!(policy.approval_threshold, 2);
+        assert_eq!(policy.approvers.len(), 2);
+        assert_eq!(policy.max_value_base_units, "1000000");
+        assert!(registry::is_valid_hash(&policy.policy_hash));
+    }
+
+    #[test]
+    fn execution_policy_rejects_threshold_larger_than_approver_set() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.configure_execution_policy(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "policy-invalid-threshold".to_owned(),
+                vec!["deploy_project_component".to_owned()],
+                vec!["0x1234567890abcdef1234567890abcdef12345678".to_owned()],
+                "1000000".to_owned(),
+                vec![account("alice.near")],
+                2,
+            )
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_policy_rejects_invalid_evm_target() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.configure_execution_policy(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "policy-invalid-target".to_owned(),
+                vec!["deploy_project_component".to_owned()],
+                vec!["not-an-evm-address".to_owned()],
+                "1000000".to_owned(),
+                vec![account("alice.near")],
+                1,
+            )
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_policy_versions_are_immutable_and_new_versions_activate() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        let original = hub
+            .get_execution_policy(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "policy-v1".to_owned(),
+            )
+            .expect("first policy version remains stored");
+        configure_execution_policy(&mut hub, "policy-v2");
+        let active = hub
+            .get_active_execution_policy(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+            )
+            .expect("second policy version is active");
+        let reused_version = catch_unwind(AssertUnwindSafe(|| {
+            configure_execution_policy(&mut hub, "policy-v1")
+        }));
+
+        assert!(reused_version.is_err());
+        assert_eq!(original.version, "policy-v1");
+        assert_eq!(active.version, "policy-v2");
+        assert_ne!(original.policy_hash, active.policy_hash);
+    }
+
+    #[test]
+    fn non_administrator_cannot_configure_execution_policy() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        set_predecessor(STRANGER);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            configure_execution_policy(&mut hub, "policy-v1")
+        }));
+
+        assert!(result.is_err());
+        set_predecessor(ADMIN);
+        assert!(hub
+            .get_active_execution_policy(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+            )
+            .is_none());
     }
 
     #[test]

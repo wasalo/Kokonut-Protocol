@@ -1,4 +1,4 @@
-use near_sdk::near;
+use near_sdk::{near, AccountId};
 
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +47,20 @@ pub struct SignerBinding {
     pub signing_scheme: String,
     pub derived_address: String,
     pub key_version: u32,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionPolicy {
+    pub project_id: String,
+    pub chain: ChainReference,
+    pub version: String,
+    pub allowed_operations: Vec<String>,
+    pub allowed_targets: Vec<String>,
+    pub max_value_base_units: String,
+    pub approvers: Vec<AccountId>,
+    pub approval_threshold: u8,
+    pub policy_hash: String,
 }
 
 pub(crate) fn validate_chain(reference: &ChainReference, family: &str, signing_scheme: &str) {
@@ -179,4 +193,115 @@ pub(crate) fn is_valid_signer_address(value: &str, family: &str) -> bool {
     }
 
     true
+}
+
+pub(crate) fn execution_policy_scope_key(project_id: &str, reference: &ChainReference) -> String {
+    format!(
+        "{project_id}:{}:{}",
+        reference.namespace, reference.chain_id
+    )
+}
+
+pub(crate) fn execution_policy_key(
+    project_id: &str,
+    reference: &ChainReference,
+    version: &str,
+) -> String {
+    format!(
+        "{}:{version}",
+        execution_policy_scope_key(project_id, reference)
+    )
+}
+
+pub(crate) fn is_valid_policy_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'-' | b'_' | b'.'))
+        })
+}
+
+pub(crate) fn is_valid_operation(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && value.len() <= 80
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+pub(crate) fn is_valid_base_units(value: &str) -> bool {
+    const UINT256_MAX: &str =
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+    if value.is_empty()
+        || value.len() > UINT256_MAX.len()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return false;
+    }
+
+    value.len() < UINT256_MAX.len() || value <= UINT256_MAX
+}
+
+pub(crate) fn hash_to_hex(hash: &[u8]) -> String {
+    let mut output = String::with_capacity(2 + hash.len() * 2);
+    output.push_str("0x");
+    for byte in hash {
+        use std::fmt::Write;
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_unit_values_are_canonical_uint256_decimals() {
+        assert!(is_valid_base_units("0"));
+        assert!(is_valid_base_units(
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        ));
+        assert!(!is_valid_base_units(""));
+        assert!(!is_valid_base_units("00"));
+        assert!(!is_valid_base_units("1.0"));
+        assert!(!is_valid_base_units(
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+        ));
+    }
+
+    #[test]
+    fn policy_version_and_operation_identifiers_are_constrained() {
+        assert!(is_valid_policy_version("policy-v1.0"));
+        assert!(!is_valid_policy_version(""));
+        assert!(!is_valid_policy_version("-policy"));
+        assert!(is_valid_operation("deploy_project_component"));
+        assert!(!is_valid_operation("DeployProject"));
+        assert!(!is_valid_operation("deploy-project"));
+    }
+
+    #[test]
+    fn policy_keys_are_scoped_by_project_chain_and_version() {
+        let first_chain = ChainReference {
+            namespace: "eip155".to_owned(),
+            chain_id: "1".to_owned(),
+        };
+        let second_chain = ChainReference {
+            namespace: "eip155".to_owned(),
+            chain_id: "8453".to_owned(),
+        };
+
+        let first = execution_policy_key("project-a", &first_chain, "v1");
+        let other_chain = execution_policy_key("project-a", &second_chain, "v1");
+        let other_version = execution_policy_key("project-a", &first_chain, "v2");
+
+        assert_ne!(first, other_chain);
+        assert_ne!(first, other_version);
+    }
+
+    #[test]
+    fn hash_to_hex_emits_lowercase_prefixed_hex() {
+        assert_eq!(hash_to_hex(&[0x00, 0xab, 0xff]), "0x00abff");
+    }
 }
