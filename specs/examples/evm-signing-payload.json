@@ -1,0 +1,34 @@
+{
+  "request": {
+    "protocol_version": "1",
+    "request_id": "018f4f7e-10bd-7d98-9b23-9ec89a1d9c3a",
+    "project_id": "018f4f7e-10bd-7d98-9b23-9ec89a1d9c3b",
+    "chain_namespace": "eip155",
+    "chain_id": "84532",
+    "operation": "deploy_project_component",
+    "target": "0x1234567890abcdef1234567890abcdef12345678",
+    "value_base_units": "0",
+    "gas_limit": "120000",
+    "calldata_hash": "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432",
+    "signing_payload_hash": "0x11a53647e6d74bf0a382e9fedc868e4cffa55ee67a93c59d6dd345a0a70a568f",
+    "nonce": "0",
+    "gas_policy": {
+      "max_fee": "1000000000",
+      "max_priority_fee": "1000000"
+    },
+    "expires_at": "2035-01-01T00:00:00Z",
+    "policy_version": "policy-v1",
+    "idempotency_key": "deploy-project-001"
+  },
+  "calldata_hex": "0x1234",
+  "expires_at_ns": 2051222400000000000,
+  "policy_hash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "active_policy": {
+    "project_id": "018f4f7e-10bd-7d98-9b23-9ec89a1d9c3b",
+    "chain": {"namespace": "eip155", "chain_id": "84532"},
+    "version": "policy-v1",
+    "policy_hash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "expected_action_hash": "0xf9b2332fac7b01353b54c1876b139b5925520df42c4305cd82fa1aff181a44eb",
+  "expected_signing_payload_hash": "0x11a53647e6d74bf0a382e9fedc868e4cffa55ee67a93c59d6dd345a0a70a568f"
+}

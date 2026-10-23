@@ -30,7 +30,17 @@
     "operation": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 80 },
     "target": { "type": "string", "minLength": 1, "maxLength": 256 },
     "value_base_units": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
-    "calldata_hash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
+    "gas_limit": { "type": "string", "pattern": "^[1-9][0-9]*$", "maxLength": 78 },
+    "calldata_hash": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{64}$",
+      "description": "For eip155 requests, Keccak-256 of the exact calldata bytes supplied to the EVM transaction encoder."
+    },
+    "signing_payload_hash": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{64}$",
+      "description": "Keccak-256 of the EIP-1559 type-2 unsigned signing payload, using the approved transaction fields and an empty access list."
+    },
     "nonce": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
     "gas_policy": {
       "type": "object",
@@ -49,9 +59,18 @@
     {
       "if": { "properties": { "chain_namespace": { "const": "eip155" } }, "required": ["chain_namespace"] },
       "then": {
+        "required": ["gas_limit", "signing_payload_hash"],
         "properties": {
           "chain_id": { "pattern": "^[1-9][0-9]*$" },
           "target": { "pattern": "^0x[0-9a-fA-F]{40}$" }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["gas_limit"] },
+            { "required": ["signing_payload_hash"] }
+          ]
         }
       }
     }

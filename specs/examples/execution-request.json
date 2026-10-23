@@ -7,13 +7,15 @@
   "operation": "deploy_project_component",
   "target": "0x1234567890abcdef1234567890abcdef12345678",
   "value_base_units": "0",
-  "calldata_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "gas_limit": "120000",
+  "calldata_hash": "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432",
+  "signing_payload_hash": "0x11a53647e6d74bf0a382e9fedc868e4cffa55ee67a93c59d6dd345a0a70a568f",
   "nonce": "0",
   "gas_policy": {
     "max_fee": "1000000000",
     "max_priority_fee": "1000000"
   },
-  "expires_at": "2026-10-24T12:00:00Z",
-  "policy_version": "protocol-policy-v1",
+  "expires_at": "2035-01-01T00:00:00Z",
+  "policy_version": "policy-v1",
   "idempotency_key": "deploy-project-001"
 }

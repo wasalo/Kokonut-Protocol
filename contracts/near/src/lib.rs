@@ -624,6 +624,29 @@ impl KokonutProtocolHub {
             registry::is_valid_signer_address(&request.target, &chain.family),
             "invalid target for chain family"
         );
+        if chain.family == "evm" {
+            let gas_limit = request
+                .gas_limit
+                .as_deref()
+                .unwrap_or_else(|| env::panic_str("EVM request is missing gas limit"));
+            assert!(
+                registry::is_valid_base_units(gas_limit) && gas_limit != "0",
+                "invalid EVM gas limit"
+            );
+            let signing_payload_hash = request
+                .signing_payload_hash
+                .as_deref()
+                .unwrap_or_else(|| env::panic_str("EVM request is missing signing payload hash"));
+            assert!(
+                registry::is_valid_hash(signing_payload_hash),
+                "invalid EVM signing payload hash"
+            );
+        } else {
+            assert!(
+                request.gas_limit.is_none() && request.signing_payload_hash.is_none(),
+                "EVM signing fields are not applicable to this chain family"
+            );
+        }
 
         let policy = self
             .get_active_execution_policy(
@@ -1092,7 +1115,9 @@ mod tests {
             operation: "deploy_project_component".to_owned(),
             target: "0x1234567890abcdef1234567890abcdef12345678".to_owned(),
             value_base_units: "500".to_owned(),
+            gas_limit: Some("120000".to_owned()),
             calldata_hash: format!("0x{}", "a".repeat(64)),
+            signing_payload_hash: Some(format!("0x{}", "b".repeat(64))),
             nonce: "0".to_owned(),
             gas_policy: GasPolicy {
                 max_fee: "10".to_owned(),
@@ -1383,6 +1408,60 @@ mod tests {
             "2035-01-01T00:00:00Z",
         );
         request.gas_policy.max_priority_fee = "11".to_owned();
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_proposal_rejects_missing_evm_signing_fields() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+            "idem-missing-signing-fields",
+            "2035-01-01T00:00:00Z",
+        );
+        request.signing_payload_hash = None;
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_proposal_rejects_zero_gas_limit() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4e",
+            "idem-zero-gas-limit",
+            "2035-01-01T00:00:00Z",
+        );
+        request.gas_limit = Some("0".to_owned());
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execution_proposal_rejects_malformed_signing_payload_hash() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c4d",
+            "idem-malformed-signing-hash",
+            "2035-01-01T00:00:00Z",
+        );
+        request.signing_payload_hash = Some("0x1234".to_owned());
 
         let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request)));
 

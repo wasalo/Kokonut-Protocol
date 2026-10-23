@@ -82,7 +82,11 @@ pub struct ExecutionRequest {
     pub operation: String,
     pub target: String,
     pub value_base_units: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gas_limit: Option<String>,
     pub calldata_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_payload_hash: Option<String>,
     pub nonce: String,
     pub gas_policy: GasPolicy,
     pub expires_at: String,
@@ -327,6 +331,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approved_execution_status_serializes_for_client_gate() {
+        assert_eq!(
+            near_sdk::serde_json::to_string(&ExecutionStatus::Approved)
+                .expect("execution status is JSON serializable"),
+            "\"Approved\""
+        );
+    }
+
+    #[test]
     fn execution_request_json_example_deserializes_to_contract_input() {
         let request: ExecutionRequest = near_sdk::serde_json::from_str(include_str!(
             "../../../specs/examples/execution-request.json"
@@ -336,6 +349,30 @@ mod tests {
         assert_eq!(request.protocol_version, "1");
         assert_eq!(request.chain_namespace, "eip155");
         assert_eq!(request.gas_policy.max_fee, "1000000000");
+        assert_eq!(request.gas_limit.as_deref(), Some("120000"));
+        assert!(request.signing_payload_hash.is_some());
+    }
+
+    #[test]
+    fn execution_request_fixture_action_hash_matches_contract_serialization() {
+        near_sdk::testing_env!(near_sdk::test_utils::VMContextBuilder::new().build());
+        let fixture: near_sdk::serde_json::Value = near_sdk::serde_json::from_str(include_str!(
+            "../../../specs/examples/evm-signing-payload.json"
+        ))
+        .expect("signing payload fixture is JSON");
+        let request: ExecutionRequest =
+            near_sdk::serde_json::from_value(fixture["request"].clone())
+                .expect("signing payload fixture request matches contract input");
+        let serialized = near_sdk::serde_json::to_vec(&request)
+            .expect("execution request serializes deterministically");
+        let actual = hash_to_hex(&near_sdk::env::sha256(&serialized));
+
+        assert_eq!(
+            actual,
+            fixture["expected_action_hash"]
+                .as_str()
+                .expect("fixture action hash is a string")
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ PYTHON ?= python3
 .PHONY: lint test lint-near test-near build-near ci
 
 lint:
-	$(PYTHON) -m compileall -q tests
+	$(PYTHON) -m compileall -q tests protocol
 	$(PYTHON) -c 'import json, pathlib; [json.loads(p.read_text()) for p in pathlib.Path("specs").rglob("*.json")]'
 
 test:

@@ -16,7 +16,9 @@ VALID_REQUEST = {
     "operation": "deploy_project_component",
     "target": "0x1234567890abcdef1234567890abcdef12345678",
     "value_base_units": "0",
+    "gas_limit": "120000",
     "calldata_hash": "0x" + "a" * 64,
+    "signing_payload_hash": "0x" + "b" * 64,
     "nonce": "0",
     "gas_policy": {"max_fee": "1000000000", "max_priority_fee": "1000000"},
     "expires_at": "2026-10-24T12:00:00Z",
@@ -57,6 +59,30 @@ class ExecutionRequestSchemaTests(unittest.TestCase):
 
     def test_calldata_hash_must_be_32_byte_hex(self):
         request = dict(VALID_REQUEST, calldata_hash="0x1234")
+        self.assertTrue(list(self.validator.iter_errors(request)))
+
+    def test_signing_payload_fields_are_required_for_eip155(self):
+        request = dict(VALID_REQUEST)
+        request.pop("gas_limit")
+        request.pop("signing_payload_hash")
+        self.assertTrue(list(self.validator.iter_errors(request)))
+
+    def test_gas_limit_must_be_positive_decimal(self):
+        request = dict(VALID_REQUEST, gas_limit="0")
+        self.assertTrue(list(self.validator.iter_errors(request)))
+
+    def test_signing_payload_hash_must_be_32_byte_hex(self):
+        request = dict(VALID_REQUEST, signing_payload_hash="0x1234")
+        self.assertTrue(list(self.validator.iter_errors(request)))
+
+    def test_non_eip155_request_can_omit_evm_signing_fields(self):
+        request = dict(VALID_REQUEST, chain_namespace="cosmos", chain_id="cosmoshub-4")
+        request.pop("gas_limit")
+        request.pop("signing_payload_hash")
+        self.assertEqual([], list(self.validator.iter_errors(request)))
+
+    def test_non_eip155_request_cannot_supply_evm_signing_fields(self):
+        request = dict(VALID_REQUEST, chain_namespace="cosmos", chain_id="cosmoshub-4")
         self.assertTrue(list(self.validator.iter_errors(request)))
 
     def test_unrecognized_fields_are_rejected(self):

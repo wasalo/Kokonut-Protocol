@@ -1,1 +1,2 @@
 jsonschema>=4.20,<5
+eth-hash[pycryptodome]>=0.7,<1
