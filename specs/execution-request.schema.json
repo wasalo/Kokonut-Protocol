@@ -41,6 +41,12 @@
       "pattern": "^0x[0-9a-fA-F]{64}$",
       "description": "Keccak-256 of the EIP-1559 type-2 unsigned signing payload, using the approved transaction fields and an empty access list."
     },
+    "signer_key_version": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "expected_effect_hash": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{64}$",
+      "description": "SHA-256 commitment to the canonical expected destination effect predicate supplied to the EVM adapter."
+    },
     "nonce": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
     "gas_policy": {
       "type": "object",
@@ -59,7 +65,7 @@
     {
       "if": { "properties": { "chain_namespace": { "const": "eip155" } }, "required": ["chain_namespace"] },
       "then": {
-        "required": ["gas_limit", "signing_payload_hash"],
+        "required": ["gas_limit", "signing_payload_hash", "signer_key_version", "expected_effect_hash"],
         "properties": {
           "chain_id": { "pattern": "^[1-9][0-9]*$" },
           "target": { "pattern": "^0x[0-9a-fA-F]{40}$" }
@@ -69,7 +75,9 @@
         "not": {
           "anyOf": [
             { "required": ["gas_limit"] },
-            { "required": ["signing_payload_hash"] }
+            { "required": ["signing_payload_hash"] },
+            { "required": ["signer_key_version"] },
+            { "required": ["expected_effect_hash"] }
           ]
         }
       }

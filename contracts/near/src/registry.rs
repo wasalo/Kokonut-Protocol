@@ -46,7 +46,15 @@ pub struct SignerBinding {
     pub derivation_path: String,
     pub signing_scheme: String,
     pub derived_address: String,
+    /// Binding version passed to the Chain Signatures `key_version` input.
     pub key_version: u32,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainSignaturesConfig {
+    pub contract_id: AccountId,
+    pub public_key: String,
 }
 
 #[near(serializers = [json, borsh])]
@@ -87,6 +95,10 @@ pub struct ExecutionRequest {
     pub calldata_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_payload_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer_key_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_effect_hash: Option<String>,
     pub nonce: String,
     pub gas_policy: GasPolicy,
     pub expires_at: String,
@@ -105,12 +117,26 @@ pub enum ExecutionStatus {
 
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignatureStatus {
+    NotRequested,
+    Pending,
+    Issued,
+    Failed,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionRequestRecord {
     pub request: ExecutionRequest,
     pub action_hash: String,
     pub policy_hash: String,
     pub proposer: AccountId,
     pub status: ExecutionStatus,
+    pub signature_status: SignatureStatus,
+    /// Public key snapshot associated with the signer contract at request time.
+    pub signature_public_key: Option<String>,
+    /// Raw JSON returned by the configured Chain Signatures contract.
+    pub signature_response: Option<String>,
     pub approval_count: u8,
     pub expires_at_ns: u64,
 }
@@ -190,6 +216,15 @@ pub(crate) fn is_valid_hash(value: &str) -> bool {
     value.len() == 66
         && value.starts_with("0x")
         && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn is_valid_secp256k1_digest(value: &str) -> bool {
+    const SECP256K1_ORDER: &str =
+        "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
+    if !is_valid_hash(value) {
+        return false;
+    }
+    value[2..].to_ascii_lowercase().as_str() < SECP256K1_ORDER
 }
 
 pub(crate) fn chain_key(reference: &ChainReference) -> String {
@@ -373,6 +408,22 @@ mod tests {
                 .as_str()
                 .expect("fixture action hash is a string")
         );
+    }
+
+    #[test]
+    fn secp256k1_digest_must_be_below_group_order() {
+        assert!(is_valid_secp256k1_digest(&format!("0x{}", "00".repeat(32))));
+        assert!(is_valid_secp256k1_digest(
+            "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"
+        ));
+        assert!(!is_valid_secp256k1_digest(
+            "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+        ));
+        assert!(!is_valid_secp256k1_digest(&format!(
+            "0x{}",
+            "ff".repeat(32)
+        )));
+        assert!(!is_valid_secp256k1_digest("not-a-digest"));
     }
 
     #[test]

@@ -24,6 +24,14 @@ class ChainCapabilitySchemaTests(unittest.TestCase):
         config = json.loads((EXAMPLES / "base-sepolia.json").read_text())
         self.assertEqual([], list(self.validator.iter_errors(config)))
 
+    def test_two_evm_testnet_configurations_are_available_for_signing(self):
+        expected = {"base-sepolia.json": "84532", "gnosis-chiado.json": "10200"}
+        for filename, chain_id in expected.items():
+            config = json.loads((EXAMPLES / filename).read_text())
+            self.assertEqual([], list(self.validator.iter_errors(config)))
+            self.assertEqual(config["chain_id"], chain_id)
+            self.assertTrue(config["capabilities"]["chain_signatures"])
+
     def test_evm_chain_requires_eip155_namespace_and_numeric_chain_id(self):
         config = json.loads((EXAMPLES / "base-sepolia.json").read_text())
         config["namespace"] = "near"

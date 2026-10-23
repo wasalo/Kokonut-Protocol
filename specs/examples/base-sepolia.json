@@ -7,7 +7,7 @@
   "signing_scheme": "secp256k1",
   "confirmations_required": 12,
   "capabilities": {
-    "chain_signatures": false,
+    "chain_signatures": true,
     "contract_deploy": true,
     "eas": false,
     "safe": true,

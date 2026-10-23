@@ -23,7 +23,11 @@
     "name": { "type": "string", "minLength": 1, "maxLength": 80 },
     "family": { "enum": ["evm", "near", "other"] },
     "signing_scheme": { "enum": ["secp256k1", "ed25519", "other"] },
-    "confirmations_required": { "type": "integer", "minimum": 0 },
+    "confirmations_required": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Informational confirmation-depth threshold; it is not consensus finality."
+    },
     "capabilities": {
       "type": "object",
       "additionalProperties": false,

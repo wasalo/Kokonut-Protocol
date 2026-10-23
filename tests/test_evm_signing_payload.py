@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from protocol.evm_signing_payload import (
     prepare_approved_eip1559_signing_payload,
@@ -24,6 +25,19 @@ class Eip1559SigningPayloadTests(unittest.TestCase):
         digest = verify_eip1559_signing_payload(request, CALLDATA)
 
         self.assertEqual(SIGNING_HASH, digest)
+
+    def test_rejects_signing_digest_outside_secp256k1_scalar_order(self):
+        calldata_digest = bytes.fromhex(REQUEST["calldata_hash"][2:])
+        invalid_digest = bytes.fromhex(
+            "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+        )
+        request = dict(REQUEST, signing_payload_hash="0x" + invalid_digest.hex())
+        with patch(
+            "protocol.evm_signing_payload.keccak",
+            side_effect=[calldata_digest, invalid_digest],
+        ):
+            with self.assertRaisesRegex(ValueError, "secp256k1 scalar"):
+                verify_eip1559_signing_payload(request, CALLDATA)
 
     def test_rejects_calldata_that_does_not_match_its_commitment(self):
         with self.assertRaisesRegex(ValueError, "calldata hash"):
@@ -144,6 +158,62 @@ class Eip1559SigningPayloadTests(unittest.TestCase):
                 CALLDATA,
                 active_policy=ACTIVE_POLICY,
                 near_block_timestamp_ns=FIXTURE["expires_at_ns"],
+            )
+
+    def test_signing_gate_rejects_missing_signer_key_version(self):
+        request = dict(REQUEST)
+        request.pop("signer_key_version")
+        record = {
+            "status": "Approved",
+            "action_hash": ACTION_HASH,
+            "policy_hash": POLICY_HASH,
+            "expires_at_ns": FIXTURE["expires_at_ns"],
+            "request": request,
+        }
+
+        with self.assertRaisesRegex(ValueError, "signer key version"):
+            prepare_approved_eip1559_signing_payload(
+                record,
+                CALLDATA,
+                active_policy=ACTIVE_POLICY,
+                near_block_timestamp_ns=1,
+            )
+
+    def test_signing_gate_rejects_negative_signer_key_version(self):
+        request = dict(REQUEST, signer_key_version=-1)
+        record = {
+            "status": "Approved",
+            "action_hash": ACTION_HASH,
+            "policy_hash": POLICY_HASH,
+            "expires_at_ns": FIXTURE["expires_at_ns"],
+            "request": request,
+        }
+
+        with self.assertRaisesRegex(ValueError, "signer key version"):
+            prepare_approved_eip1559_signing_payload(
+                record,
+                CALLDATA,
+                active_policy=ACTIVE_POLICY,
+                near_block_timestamp_ns=1,
+            )
+
+    def test_signing_gate_rejects_missing_expected_effect_hash(self):
+        request = dict(REQUEST)
+        request.pop("expected_effect_hash")
+        record = {
+            "status": "Approved",
+            "action_hash": ACTION_HASH,
+            "policy_hash": POLICY_HASH,
+            "expires_at_ns": FIXTURE["expires_at_ns"],
+            "request": request,
+        }
+
+        with self.assertRaisesRegex(ValueError, "expected effect hash"):
+            prepare_approved_eip1559_signing_payload(
+                record,
+                CALLDATA,
+                active_policy=ACTIVE_POLICY,
+                near_block_timestamp_ns=1,
             )
 
     def test_signing_gate_rejects_superseded_policy_version(self):

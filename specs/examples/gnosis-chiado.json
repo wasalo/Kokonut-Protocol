@@ -1,0 +1,18 @@
+{
+  "protocol_version": "1",
+  "namespace": "eip155",
+  "chain_id": "10200",
+  "name": "Gnosis Chiado",
+  "family": "evm",
+  "signing_scheme": "secp256k1",
+  "confirmations_required": 32,
+  "capabilities": {
+    "chain_signatures": true,
+    "contract_deploy": true,
+    "eas": false,
+    "safe": false,
+    "baal": false,
+    "intents_settlement": false
+  },
+  "status": "proposed"
+}

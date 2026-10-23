@@ -10,6 +10,8 @@
   "gas_limit": "120000",
   "calldata_hash": "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432",
   "signing_payload_hash": "0x11a53647e6d74bf0a382e9fedc868e4cffa55ee67a93c59d6dd345a0a70a568f",
+  "signer_key_version": 0,
+  "expected_effect_hash": "0x25028eb0c5c97e0251badc598ae0573057547611b5e9c7e355cf2b0f2576ad23",
   "nonce": "0",
   "gas_policy": {
     "max_fee": "1000000000",

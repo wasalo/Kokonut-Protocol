@@ -11,6 +11,8 @@
     "gas_limit": "120000",
     "calldata_hash": "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432",
     "signing_payload_hash": "0x11a53647e6d74bf0a382e9fedc868e4cffa55ee67a93c59d6dd345a0a70a568f",
+    "signer_key_version": 0,
+    "expected_effect_hash": "0x25028eb0c5c97e0251badc598ae0573057547611b5e9c7e355cf2b0f2576ad23",
     "nonce": "0",
     "gas_policy": {
       "max_fee": "1000000000",
@@ -29,6 +31,12 @@
     "version": "policy-v1",
     "policy_hash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   },
-  "expected_action_hash": "0xf9b2332fac7b01353b54c1876b139b5925520df42c4305cd82fa1aff181a44eb",
+  "expected_effect": {
+    "kind": "event",
+    "address": "0x1234567890abcdef1234567890abcdef12345678",
+    "topics": ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    "data": "0x"
+  },
+  "expected_action_hash": "0x6fe93926b32b87c19d0a4cc06dd7a7219bd1394c909c74e45a13402cab68442d",
   "expected_signing_payload_hash": "0x11a53647e6d74bf0a382e9fedc868e4cffa55ee67a93c59d6dd345a0a70a568f"
 }

@@ -14,5 +14,5 @@ Represent NEAR and each destination chain as separate chain profiles. NEAR may p
 - Capability declarations are versioned and validated against a shared schema.
 - Chain family, namespace, and signing scheme are explicit and cross-validated.
 - The first examples cover a NEAR hub and an EVM test destination; they do not imply that either is production-enabled.
-- The initial NEAR contract records chain/project profile commitments, versioned signer bindings and immutable policy versions, and enforces a policy-gated execution proposal/approval lifecycle. It does not yet request Chain Signatures, execute destination transactions, or provide financial rights.
+- The initial NEAR contract records chain/project profile commitments, versioned signer bindings and immutable policy versions, enforces a policy-gated execution proposal/approval lifecycle, and exposes a configurable testnet-only Chain Signatures request for an approved EVM digest. It does not execute destination transactions, provide financial rights, or constitute a production deployment.
 - The contract's administrator must be a governance-controlled NEAR account for any deployment; a single externally controlled key is not an accepted production configuration.

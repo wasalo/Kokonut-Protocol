@@ -19,6 +19,8 @@ VALID_REQUEST = {
     "gas_limit": "120000",
     "calldata_hash": "0x" + "a" * 64,
     "signing_payload_hash": "0x" + "b" * 64,
+    "signer_key_version": 1,
+    "expected_effect_hash": "0x" + "c" * 64,
     "nonce": "0",
     "gas_policy": {"max_fee": "1000000000", "max_priority_fee": "1000000"},
     "expires_at": "2026-10-24T12:00:00Z",
@@ -67,6 +69,21 @@ class ExecutionRequestSchemaTests(unittest.TestCase):
         request.pop("signing_payload_hash")
         self.assertTrue(list(self.validator.iter_errors(request)))
 
+    def test_signer_key_version_is_required_and_nonnegative_for_eip155(self):
+        missing = dict(VALID_REQUEST)
+        missing.pop("signer_key_version")
+        negative = dict(VALID_REQUEST, signer_key_version=-1)
+        self.assertTrue(list(self.validator.iter_errors(missing)))
+        self.assertEqual([], list(self.validator.iter_errors(VALID_REQUEST)))
+        self.assertTrue(list(self.validator.iter_errors(negative)))
+
+    def test_expected_effect_hash_is_required_and_32_byte_hex_for_eip155(self):
+        missing = dict(VALID_REQUEST)
+        missing.pop("expected_effect_hash")
+        malformed = dict(VALID_REQUEST, expected_effect_hash="0x1234")
+        self.assertTrue(list(self.validator.iter_errors(missing)))
+        self.assertTrue(list(self.validator.iter_errors(malformed)))
+
     def test_gas_limit_must_be_positive_decimal(self):
         request = dict(VALID_REQUEST, gas_limit="0")
         self.assertTrue(list(self.validator.iter_errors(request)))
@@ -79,6 +96,8 @@ class ExecutionRequestSchemaTests(unittest.TestCase):
         request = dict(VALID_REQUEST, chain_namespace="cosmos", chain_id="cosmoshub-4")
         request.pop("gas_limit")
         request.pop("signing_payload_hash")
+        request.pop("signer_key_version")
+        request.pop("expected_effect_hash")
         self.assertEqual([], list(self.validator.iter_errors(request)))
 
     def test_non_eip155_request_cannot_supply_evm_signing_fields(self):

@@ -11,6 +11,9 @@ from typing import TypeAlias
 from eth_hash.auto import keccak
 
 _UINT256_MAX = (1 << 256) - 1
+_SECP256K1_ORDER = int(
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16
+)
 _HEX_32 = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _HEX_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
@@ -124,6 +127,8 @@ def verify_eip1559_signing_payload(request: Mapping[str, object], calldata_hex: 
     ]
     preimage = b"\x02" + _rlp_encode_list(unsigned_fields)
     actual_signing_payload_hash = "0x" + keccak(preimage).hex()
+    if int(actual_signing_payload_hash[2:], 16) >= _SECP256K1_ORDER:
+        raise ValueError("signing payload hash is not a valid secp256k1 scalar")
 
     committed_hash = request.get("signing_payload_hash")
     if not isinstance(committed_hash, str) or not _HEX_32.fullmatch(committed_hash):
@@ -161,6 +166,16 @@ def prepare_approved_eip1559_signing_payload(
     request = record.get("request")
     if not isinstance(request, Mapping):
         raise ValueError("NEAR record is missing its request object")
+    signer_key_version = request.get("signer_key_version")
+    if (
+        not isinstance(signer_key_version, int)
+        or isinstance(signer_key_version, bool)
+        or signer_key_version < 0
+    ):
+        raise ValueError("approved request is missing a valid signer key version")
+    expected_effect_hash = request.get("expected_effect_hash")
+    if not isinstance(expected_effect_hash, str) or not _HEX_32.fullmatch(expected_effect_hash):
+        raise ValueError("approved request is missing a valid expected effect hash")
     policy_chain = active_policy.get("chain")
     if not isinstance(policy_chain, Mapping):
         raise ValueError("active policy chain scope is invalid")
@@ -195,6 +210,8 @@ def prepare_approved_eip1559_signing_payload(
         "gas_limit",
         "calldata_hash",
         "signing_payload_hash",
+        "signer_key_version",
+        "expected_effect_hash",
         "nonce",
         "gas_policy",
         "expires_at",
