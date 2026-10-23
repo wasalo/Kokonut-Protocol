@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kokonut.network/protocol/specs/chain-capabilities.schema.json",
+  "title": "Kokonut Protocol Chain Capability",
+  "description": "Versioned, chain-neutral declaration of a network's Protocol capabilities. NEAR hub and destination networks are represented as separate profiles.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "namespace",
+    "chain_id",
+    "name",
+    "family",
+    "signing_scheme",
+    "confirmations_required",
+    "capabilities",
+    "status"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "namespace": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "chain_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "family": { "enum": ["evm", "near", "other"] },
+    "signing_scheme": { "enum": ["secp256k1", "ed25519", "other"] },
+    "confirmations_required": { "type": "integer", "minimum": 0 },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chain_signatures",
+        "contract_deploy",
+        "eas",
+        "safe",
+        "baal",
+        "intents_settlement"
+      ],
+      "properties": {
+        "chain_signatures": { "type": "boolean" },
+        "contract_deploy": { "type": "boolean" },
+        "eas": { "type": "boolean" },
+        "safe": { "type": "boolean" },
+        "baal": { "type": "boolean" },
+        "intents_settlement": { "type": "boolean" }
+      }
+    },
+    "status": { "enum": ["proposed", "enabled", "disabled"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "family": { "const": "evm" } }, "required": ["family"] },
+      "then": {
+        "properties": {
+          "namespace": { "const": "eip155" },
+          "chain_id": { "pattern": "^[1-9][0-9]*$" },
+          "signing_scheme": { "const": "secp256k1" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "family": { "const": "near" } }, "required": ["family"] },
+      "then": {
+        "properties": {
+          "namespace": { "const": "near" },
+          "signing_scheme": { "enum": ["ed25519", "secp256k1"] }
+        }
+      }
+    }
+  ]
+}

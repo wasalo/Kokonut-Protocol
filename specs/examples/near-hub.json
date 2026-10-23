@@ -1,0 +1,18 @@
+{
+  "protocol_version": "1",
+  "namespace": "near",
+  "chain_id": "mainnet",
+  "name": "NEAR Mainnet Hub",
+  "family": "near",
+  "signing_scheme": "ed25519",
+  "confirmations_required": 1,
+  "capabilities": {
+    "chain_signatures": true,
+    "contract_deploy": true,
+    "eas": false,
+    "safe": false,
+    "baal": false,
+    "intents_settlement": false
+  },
+  "status": "proposed"
+}
