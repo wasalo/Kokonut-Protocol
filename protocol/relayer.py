@@ -57,6 +57,10 @@ class SignatureRequester(Protocol):
 
 
 class EvmAdapterPort(Protocol):
+    def get_nonce_lease(self, request_id: str) -> Mapping[str, Any] | None: ...
+
+    def transaction_hash(self, raw_transaction: str) -> str: ...
+
     def reserve_approved_nonce(self, record: Mapping[str, Any], calldata_hex: str, *,
                                active_policy: Mapping[str, Any], near_block_timestamp_ns: int,
                                signer_address: str) -> int: ...
@@ -77,6 +81,10 @@ class EvmAdapterPort(Protocol):
                                    expected_effect: Mapping[str, Any]) -> bool: ...
 
 
+class ManualReviewRequired(RuntimeError):
+    """Raised when a nonce lease is quarantined for human review."""
+
+
 class ExecutionRelayer:
     """Run one approved request through signing, broadcast, and finality checks.
 
@@ -93,6 +101,16 @@ class ExecutionRelayer:
 
     def process(self, request_id: str) -> RelayerResult:
         snapshot = self._snapshots.read(request_id)
+        lease = self._adapter.get_nonce_lease(request_id)
+        if lease is not None:
+            lease_state = lease.get("state")
+            if lease_state == "confirmed":
+                return self._confirmed_result(request_id, snapshot, lease)
+            if lease_state == "manual_review":
+                raise ManualReviewRequired("nonce lease requires manual review")
+            if lease_state not in {"reserved", "signed", "broadcast"}:
+                raise ValueError("nonce lease has an unknown state")
+
         digest = self._validate_snapshot(snapshot, request_id)
         request = snapshot.record["request"]
         action_hash = snapshot.record["action_hash"]
@@ -173,3 +191,40 @@ class ExecutionRelayer:
         ).lower():
             raise ValueError("expected effect does not match the approved request commitment")
         return digest
+
+    def _confirmed_result(
+        self, request_id: str, snapshot: RelayerSnapshot, lease: Mapping[str, Any]
+    ) -> RelayerResult:
+        request = snapshot.record.get("request")
+        if not isinstance(request, Mapping) or request.get("request_id") != request_id:
+            raise ValueError("confirmed nonce lease does not match the requested execution ID")
+        if lease.get("request_id") != request_id:
+            raise ValueError("confirmed nonce lease has a mismatched request ID")
+        if str(request.get("chain_id")) != lease.get("chain_id"):
+            raise ValueError("confirmed nonce lease belongs to another chain")
+        if not isinstance(request.get("nonce"), str) or not request["nonce"].isdigit():
+            raise ValueError("confirmed request nonce is malformed")
+        nonce = int(request["nonce"])
+        if isinstance(lease.get("nonce"), bool) or lease.get("nonce") != nonce:
+            raise ValueError("confirmed nonce lease differs from the approved nonce")
+        sender = lease.get("sender")
+        if not isinstance(sender, str) or sender.lower() != snapshot.signer_address.lower():
+            raise ValueError("confirmed nonce lease differs from the approved signer")
+        if hash_expected_effect(snapshot.expected_effect).lower() != str(
+            request.get("expected_effect_hash", "")
+        ).lower():
+            raise ValueError("confirmed execution effect differs from its request commitment")
+
+        raw_transaction = lease.get("raw_transaction")
+        transaction_hash = lease.get("transaction_hash")
+        if not isinstance(raw_transaction, str) or not isinstance(transaction_hash, str):
+            raise ValueError("confirmed nonce lease is missing its signed transaction")
+        if self._adapter.transaction_hash(raw_transaction).lower() != transaction_hash.lower():
+            raise ValueError("confirmed nonce lease transaction hash is invalid")
+        return RelayerResult(
+            request_id=request_id,
+            state="finalized",
+            transaction_hash=transaction_hash,
+            nonce=nonce,
+            effect_verified=True,
+        )

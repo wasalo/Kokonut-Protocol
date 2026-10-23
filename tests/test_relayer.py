@@ -3,7 +3,7 @@ from pathlib import Path
 import unittest
 
 from protocol.evm_adapter import FinalityResult, PreparedTransaction, hash_expected_effect
-from protocol.relayer import ExecutionRelayer, RelayerSnapshot
+from protocol.relayer import ExecutionRelayer, ManualReviewRequired, RelayerSnapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = json.loads((ROOT / "specs/examples/evm-signing-payload.json").read_text())
@@ -42,10 +42,17 @@ class SignatureSource:
 
 
 class Adapter:
-    def __init__(self, events, finality="finalized", effect_verified=True):
+    def __init__(self, events, finality="finalized", effect_verified=True, lease=None):
         self.events = events
         self.finality = finality
         self.effect_verified = effect_verified
+        self.lease = lease
+
+    def get_nonce_lease(self, request_id):
+        return self.lease
+
+    def transaction_hash(self, raw_transaction):
+        return TRANSACTION_HASH
 
     def reserve_approved_nonce(self, record, calldata_hex, *, active_policy, near_block_timestamp_ns, signer_address):
         self.events.append(("reserve", record["request"]["request_id"]))
@@ -124,6 +131,19 @@ class ExecutionRelayerTests(unittest.TestCase):
 
         self.assertNotIn("broadcast", [event[0] for event in events])
         self.assertNotIn("prepare", [event[0] for event in events])
+
+    def test_manual_review_lease_raises_nonretryable_signal_before_signing(self):
+        events = []
+        lease = {"request_id": REQUEST["request_id"], "state": "manual_review"}
+        snapshots = SnapshotSource([snapshot()])
+        relayer = ExecutionRelayer(
+            snapshots, SignatureSource(events), Adapter(events, lease=lease)
+        )
+
+        with self.assertRaises(ManualReviewRequired):
+            relayer.process(REQUEST["request_id"])
+
+        self.assertEqual(events, [])
 
     def test_nonfinalized_receipt_does_not_verify_effect(self):
         events = []

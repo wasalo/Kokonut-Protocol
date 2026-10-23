@@ -11,7 +11,7 @@
 5. Prepare and broadcast only through `EvmAdapter`. The adapter revalidates the fresh approval and policy, verifies the signature and derived address, and reuses the persisted signed bytes on a retry.
 6. Return the adapter's finality state. Verify the expected effect only after consensus finality; an effect mismatch returns `manual_review`.
 
-`process()` is not a polling loop. A `pending`, `confirming`, or `confirmation_threshold_met` result is not finality and does not verify the effect. The caller should schedule another durable attempt. Exceptions are allowed to propagate to the caller's existing retry/dead-letter handling.
+`process()` is not a polling loop. A `pending`, `confirming`, or `confirmation_threshold_met` result is not finality and does not verify the effect. The caller should schedule another durable attempt. On each attempt the worker reads the durable nonce lease first: a `confirmed` lease is returned as an idempotent finalized result only after its request identity, chain, signer, nonce, expected-effect commitment, and signed-transaction hash are checked; `manual_review` raises `ManualReviewRequired` so the caller can route it to a human-review queue instead of retrying. `signed` and `broadcast` leases resume through the same persisted transaction bytes. Other exceptions propagate to the caller's retry/dead-letter handling.
 
 ## Adapter contracts
 

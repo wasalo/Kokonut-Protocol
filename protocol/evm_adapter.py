@@ -449,6 +449,11 @@ class EvmAdapter:
         self.rpc = rpc
         self.nonce_manager = nonce_manager
 
+    def get_nonce_lease(self, request_id: str) -> dict[str, Any] | None:
+        if self.nonce_manager is None:
+            raise ValueError("durable nonce manager is required")
+        return self.nonce_manager.get(request_id)
+
     @classmethod
     def from_env(cls, network: EvmNetworkConfig, nonce_manager: NonceManager, environ: Mapping[str, str] | None = None):
         return cls(network, JsonRpcClient(network.rpc_url(environ)), nonce_manager)
