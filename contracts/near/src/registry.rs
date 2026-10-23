@@ -37,6 +37,18 @@ pub struct Project {
     pub active: bool,
 }
 
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignerBinding {
+    pub project_id: String,
+    pub chain: ChainReference,
+    pub purpose: String,
+    pub derivation_path: String,
+    pub signing_scheme: String,
+    pub derived_address: String,
+    pub key_version: u32,
+}
+
 pub(crate) fn validate_chain(reference: &ChainReference, family: &str, signing_scheme: &str) {
     assert!(
         !reference.namespace.is_empty()
@@ -116,4 +128,55 @@ pub(crate) fn is_valid_hash(value: &str) -> bool {
 
 pub(crate) fn chain_key(reference: &ChainReference) -> String {
     format!("{}:{}", reference.namespace, reference.chain_id)
+}
+
+pub(crate) fn signer_scope_key(
+    project_id: &str,
+    reference: &ChainReference,
+    purpose: &str,
+) -> String {
+    format!(
+        "{project_id}:{}:{}:{purpose}",
+        reference.namespace, reference.chain_id
+    )
+}
+
+pub(crate) fn signer_binding_key(
+    project_id: &str,
+    reference: &ChainReference,
+    purpose: &str,
+    key_version: u32,
+) -> String {
+    format!(
+        "{}:{key_version}",
+        signer_scope_key(project_id, reference, purpose)
+    )
+}
+
+pub(crate) fn expected_derivation_path(
+    project_id: &str,
+    reference: &ChainReference,
+    purpose: &str,
+) -> String {
+    format!(
+        "kokonut/v1/project/{project_id}/{}/{}/{purpose}",
+        reference.namespace, reference.chain_id
+    )
+}
+
+pub(crate) fn is_valid_signer_address(value: &str, family: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 256
+        || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return false;
+    }
+
+    if family == "evm" {
+        return value.len() == 42
+            && value.starts_with("0x")
+            && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+
+    true
 }

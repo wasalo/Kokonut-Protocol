@@ -5,10 +5,11 @@ Initial registry slice for the Kokonut Protocol Hub. It currently supports:
 - Administrator-gated chain registration and enable/disable status.
 - Project registration against a profile hash and explicitly enabled destination chains.
 - Administrator-gated project activation status.
+- Versioned signer bindings scoped to project, destination chain, and purpose, with explicit activation and preserved history during rotation.
 - Structured events for registry changes.
 - A pause flag reserved for the execution layer; no execution methods exist yet.
 
-The contract does not yet request NEAR Chain Signatures, deploy destination contracts, or hold or distribute funds. Do not treat this crate as production-ready.
+The contract does not yet request NEAR Chain Signatures, verify that a recorded address was actually derived from its path, deploy destination contracts, or hold or distribute funds. Do not treat this crate as production-ready.
 
 ## Administrator boundary
 

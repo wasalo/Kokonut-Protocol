@@ -25,5 +25,8 @@ jobs:
     container: rust:1.99.1
     steps:
       - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git
       - run: rustup target add wasm32-unknown-unknown
+      - run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh -o /tmp/cargo-near-installer.sh
+      - run: CARGO_NEAR_NO_MODIFY_PATH=1 CARGO_NEAR_DISABLE_UPDATE=1 sh /tmp/cargo-near-installer.sh --quiet
       - run: make lint-near test-near build-near

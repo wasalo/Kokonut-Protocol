@@ -2,7 +2,7 @@ mod registry;
 
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, AccountId, PanicOnDefault};
-pub use registry::{ChainCapabilities, ChainConfig, ChainReference, Project};
+pub use registry::{ChainCapabilities, ChainConfig, ChainReference, Project, SignerBinding};
 use std::collections::HashSet;
 
 #[near(contract_state)]
@@ -12,6 +12,8 @@ pub struct KokonutProtocolHub {
     paused: bool,
     chains: LookupMap<String, ChainConfig>,
     projects: LookupMap<String, Project>,
+    signer_bindings: LookupMap<String, SignerBinding>,
+    active_signers: LookupMap<String, u32>,
 }
 
 #[near]
@@ -27,6 +29,8 @@ impl KokonutProtocolHub {
             paused: false,
             chains: LookupMap::new(vec![0x01]),
             projects: LookupMap::new(vec![0x02]),
+            signer_bindings: LookupMap::new(vec![0x03]),
+            active_signers: LookupMap::new(vec![0x04]),
         }
     }
 
@@ -149,6 +153,180 @@ impl KokonutProtocolHub {
             "project_status_changed",
             near_sdk::serde_json::json!({ "project_id": project_id, "active": active }),
         );
+    }
+
+    pub fn configure_signer(
+        &mut self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+        purpose: String,
+        derivation_path: String,
+        signing_scheme: String,
+        derived_address: String,
+        key_version: u32,
+    ) {
+        self.assert_administrator();
+        assert!(
+            registry::is_valid_project_id(&project_id),
+            "invalid project ID"
+        );
+        assert!(
+            matches!(purpose.as_str(), "deployer" | "operator" | "settlement"),
+            "unsupported signer purpose"
+        );
+        assert!(key_version > 0, "key version must be positive");
+
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        let project = self
+            .projects
+            .get(&project_id)
+            .unwrap_or_else(|| env::panic_str("project not registered"));
+        assert!(project.active, "project is inactive");
+        assert!(
+            project.approved_chains.contains(&reference),
+            "chain is not approved for project"
+        );
+        let chain = self
+            .chains
+            .get(&registry::chain_key(&reference))
+            .unwrap_or_else(|| env::panic_str("chain not registered"));
+        assert!(chain.enabled, "chain is disabled");
+        assert_eq!(
+            signing_scheme, chain.signing_scheme,
+            "signing scheme does not match chain policy"
+        );
+        assert_eq!(
+            derivation_path,
+            registry::expected_derivation_path(&project_id, &reference, &purpose),
+            "derivation path must isolate project, chain, and purpose"
+        );
+        assert!(
+            registry::is_valid_signer_address(&derived_address, &chain.family),
+            "invalid derived address"
+        );
+
+        let binding_key =
+            registry::signer_binding_key(&project_id, &reference, &purpose, key_version);
+        assert!(
+            self.signer_bindings.get(&binding_key).is_none(),
+            "signer key version already registered"
+        );
+        let binding = SignerBinding {
+            project_id: project_id.clone(),
+            chain: reference.clone(),
+            purpose: purpose.clone(),
+            derivation_path,
+            signing_scheme,
+            derived_address: derived_address.clone(),
+            key_version,
+        };
+        self.signer_bindings.insert(binding_key, binding);
+        self.emit_event(
+            "signer_binding_registered",
+            near_sdk::serde_json::json!({
+                "project_id": project_id,
+                "chain": reference,
+                "purpose": purpose,
+                "derived_address": derived_address,
+                "key_version": key_version
+            }),
+        );
+    }
+
+    pub fn activate_signer(
+        &mut self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+        purpose: String,
+        key_version: u32,
+    ) {
+        self.assert_administrator();
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        let project = self
+            .projects
+            .get(&project_id)
+            .unwrap_or_else(|| env::panic_str("project not registered"));
+        assert!(project.active, "project is inactive");
+        assert!(
+            project.approved_chains.contains(&reference),
+            "chain is not approved for project"
+        );
+        let chain = self
+            .chains
+            .get(&registry::chain_key(&reference))
+            .unwrap_or_else(|| env::panic_str("chain not registered"));
+        assert!(chain.enabled, "chain is disabled");
+
+        let binding_key =
+            registry::signer_binding_key(&project_id, &reference, &purpose, key_version);
+        assert!(
+            self.signer_bindings.get(&binding_key).is_some(),
+            "signer binding not registered"
+        );
+        let scope_key = registry::signer_scope_key(&project_id, &reference, &purpose);
+        self.active_signers.insert(scope_key, key_version);
+        self.emit_event(
+            "signer_binding_activated",
+            near_sdk::serde_json::json!({
+                "project_id": project_id,
+                "chain": reference,
+                "purpose": purpose,
+                "key_version": key_version
+            }),
+        );
+    }
+
+    pub fn get_signer_binding(
+        &self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+        purpose: String,
+        key_version: u32,
+    ) -> Option<SignerBinding> {
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        self.signer_bindings
+            .get(&registry::signer_binding_key(
+                &project_id,
+                &reference,
+                &purpose,
+                key_version,
+            ))
+            .cloned()
+    }
+
+    pub fn get_active_signer(
+        &self,
+        project_id: String,
+        namespace: String,
+        chain_id: String,
+        purpose: String,
+    ) -> Option<SignerBinding> {
+        let reference = ChainReference {
+            namespace,
+            chain_id,
+        };
+        let scope_key = registry::signer_scope_key(&project_id, &reference, &purpose);
+        let key_version = self.active_signers.get(&scope_key).copied()?;
+        self.signer_bindings
+            .get(&registry::signer_binding_key(
+                &project_id,
+                &reference,
+                &purpose,
+                key_version,
+            ))
+            .cloned()
     }
 
     pub fn pause(&mut self) {
@@ -335,5 +513,169 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    fn registered_project(hub: &mut KokonutProtocolHub) {
+        register_evm_chain(hub, true);
+        hub.register_project(
+            PROJECT_ID.to_owned(),
+            PROFILE_HASH.to_owned(),
+            vec![ChainReference {
+                namespace: "eip155".to_owned(),
+                chain_id: "84532".to_owned(),
+            }],
+        );
+    }
+
+    fn configure_signer(hub: &mut KokonutProtocolHub, key_version: u32, address: &str) {
+        hub.configure_signer(
+            PROJECT_ID.to_owned(),
+            "eip155".to_owned(),
+            "84532".to_owned(),
+            "deployer".to_owned(),
+            format!("kokonut/v1/project/{PROJECT_ID}/eip155/84532/deployer"),
+            "secp256k1".to_owned(),
+            address.to_owned(),
+            key_version,
+        );
+    }
+
+    #[test]
+    fn signer_binding_must_use_project_chain_and_purpose_specific_path() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            hub.configure_signer(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "deployer".to_owned(),
+                "kokonut/v1/project/another-project/eip155/84532/deployer".to_owned(),
+                "secp256k1".to_owned(),
+                "0x1234567890abcdef1234567890abcdef12345678".to_owned(),
+                1,
+            )
+        }));
+
+        assert!(result.is_err());
+        assert!(hub
+            .get_signer_binding(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "deployer".to_owned(),
+                1,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn non_administrator_cannot_configure_signer() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        set_predecessor(STRANGER);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            configure_signer(&mut hub, 1, "0x1234567890abcdef1234567890abcdef12345678")
+        }));
+
+        assert!(result.is_err());
+        set_predecessor(ADMIN);
+        assert!(hub
+            .get_signer_binding(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "deployer".to_owned(),
+                1,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn signer_binding_rejects_unapproved_chain_and_malformed_evm_address() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        hub.register_chain(
+            "eip155".to_owned(),
+            "1".to_owned(),
+            "evm".to_owned(),
+            "secp256k1".to_owned(),
+            ChainCapabilities {
+                chain_signatures: false,
+                contract_deploy: true,
+                eas: false,
+                safe: true,
+                baal: false,
+                intents_settlement: false,
+            },
+            true,
+        );
+
+        let wrong_chain = catch_unwind(AssertUnwindSafe(|| {
+            hub.configure_signer(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "1".to_owned(),
+                "deployer".to_owned(),
+                format!("kokonut/v1/project/{PROJECT_ID}/eip155/1/deployer"),
+                "secp256k1".to_owned(),
+                "0x1234567890abcdef1234567890abcdef12345678".to_owned(),
+                1,
+            )
+        }));
+        let malformed_address =
+            catch_unwind(AssertUnwindSafe(|| configure_signer(&mut hub, 1, "0x1234")));
+
+        assert!(wrong_chain.is_err());
+        assert!(malformed_address.is_err());
+    }
+
+    #[test]
+    fn signer_rotation_preserves_old_binding_and_activates_new_version() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        let first_address = "0x1234567890abcdef1234567890abcdef12345678";
+        let second_address = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
+        configure_signer(&mut hub, 1, first_address);
+        hub.activate_signer(
+            PROJECT_ID.to_owned(),
+            "eip155".to_owned(),
+            "84532".to_owned(),
+            "deployer".to_owned(),
+            1,
+        );
+        configure_signer(&mut hub, 2, second_address);
+        hub.activate_signer(
+            PROJECT_ID.to_owned(),
+            "eip155".to_owned(),
+            "84532".to_owned(),
+            "deployer".to_owned(),
+            2,
+        );
+
+        let old = hub
+            .get_signer_binding(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "deployer".to_owned(),
+                1,
+            )
+            .expect("old binding remains in history");
+        let active = hub
+            .get_active_signer(
+                PROJECT_ID.to_owned(),
+                "eip155".to_owned(),
+                "84532".to_owned(),
+                "deployer".to_owned(),
+            )
+            .expect("new binding is active");
+
+        assert_eq!(old.derived_address, first_address);
+        assert_eq!(active.key_version, 2);
+        assert_eq!(active.derived_address, second_address);
     }
 }

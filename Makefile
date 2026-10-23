@@ -10,12 +10,12 @@ test:
 	$(PYTHON) -m unittest discover -s tests -v
 
 lint-near:
-	cd contracts/near && cargo fmt --check
+	cd contracts/near && cargo fmt --check && cargo near check --locked
 
 test-near:
 	cd contracts/near && cargo test --locked
 
 build-near:
-	cd contracts/near && cargo build --locked --release --target wasm32-unknown-unknown
+	cd contracts/near && cargo near build non-reproducible-wasm --locked --out-dir target/deploy
 
 ci: lint test lint-near test-near build-near
