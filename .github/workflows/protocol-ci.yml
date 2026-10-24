@@ -34,13 +34,15 @@ jobs:
   protocol-evm:
     name: protocol-evm
     runs-on: ubuntu-latest
-    env:
-      FOUNDRY_DIR: ${{ runner.temp }}/foundry
     steps:
       - uses: actions/checkout@v4
       - run: curl --proto '=https' --tlsv1.2 -fsSL https://foundry.paradigm.xyz -o "$RUNNER_TEMP/foundryup-init.sh"
-      - run: sh "$RUNNER_TEMP/foundryup-init.sh" --yes
-      - run: |
+      - env:
+          FOUNDRY_DIR: ${{ runner.temp }}/foundry
+        run: sh "$RUNNER_TEMP/foundryup-init.sh" --yes
+      - env:
+          FOUNDRY_DIR: ${{ runner.temp }}/foundry
+        run: |
           "$FOUNDRY_DIR/bin/foundryup" --install "$(tr -d '\\r\\n' < contracts/evm/.foundry-version)"
           echo "$FOUNDRY_DIR/bin" >> "$GITHUB_PATH"
       - run: make lint-evm test-evm
