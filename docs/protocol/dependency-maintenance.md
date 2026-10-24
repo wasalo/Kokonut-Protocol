@@ -19,6 +19,13 @@
 - Semgrep's current release requires `jsonschema~=4.25.1`, while the Protocol test requirements now require `jsonschema>=4.26.0`. The EVM workflow therefore installs Semgrep in its own Python 3.12 virtual environment; both environments resolve and run independently. This avoids downgrading the Protocol's current JSON Schema dependency.
 - Semgrep CI also consumes the public `p/smart-contracts` registry pack dynamically. The ruleset revision is not pinned, so a pinned CLI alone does not make the scan fully reproducible; vendoring or pinning the ruleset remains open.
 
+## Recent upstream security fixes covered by current pins
+
+- Foundry `1.8.6`, released October 21, 2026, is a security patch release. It updates bundled `rustls` to `0.23.46` and `zip` to `9.0.4`, addressing RustSec `RUSTSEC-2026-0346` through `0349` and `RUSTSEC-2026-0367` through `0369`. The current Foundry pin includes these fixes. These bundled tool dependencies were not part of the Cargo.lock/Python OSV package-pair query and are not included in its five-match count.[12]
+- Solidity advisory `SOL-2026-7`, disclosed October 22, 2026, is rated low severity and affects optimized Yul under the conditions in the compiler advisory; it is fixed in `0.8.38`. This repository pins Solidity `0.8.38` and enables the optimizer, so new builds use the fixed compiler. This does not assess any artifact produced with an earlier compiler version.[26]
+- On October 24, 2026, the authenticated GitHub Dependabot Alerts API query for this repository with `state=all` returned zero records. This is a dated repository-alert snapshot, separate from the package-version OSV query above.
+- `requirements-dev.txt` uses version ranges and there is no tracked Python lockfile. The Python OSV inventory reflects the resolved environment snapshots checked for this review, not a fully locked Python dependency graph.
+
 ## Advisory review and residuals
 
 The exact OSV querybatch review covered 279 Cargo.lock package/version pairs, 51 installed Protocol/Slither Python pairs, and 66 installed Semgrep Python pairs. It returned five advisory matches: three Rust lockfile matches, no match in the Protocol/Slither Python environment, and two Semgrep-only Python matches. The exact findings follow.[23][24][25]
@@ -49,7 +56,7 @@ These findings remain open where upstream stable constraints prevent a safe upda
 [9] https://github.com/actions/setup-python/releases/tag/v7.1.0
 [10] https://github.com/rust-lang/rust/releases/tag/1.99.1
 [11] https://github.com/near/cargo-near/releases/tag/cargo-near-v0.22.0
-[12] https://github.com/foundry-rs/foundry/releases/tag/v1.8.6
+[12] https://github.com/foundry-rs/foundry/releases/tag/v1.8.6 — Foundry v1.8.6 release notes
 [13] https://github.com/ethereum/solidity/releases/tag/v0.8.38
 [14] https://github.com/crytic/slither/releases/tag/0.11.6
 [15] https://github.com/semgrep/semgrep/releases/tag/v1.182.0
@@ -63,3 +70,4 @@ These findings remain open where upstream stable constraints prevent a safe upda
 [23] https://api.osv.dev/v1/vulns/RUSTSEC-2026-0387
 [24] https://api.osv.dev/v1/vulns/GHSA-84m7-p3x7-pcfv
 [25] https://api.osv.dev/v1/vulns/GHSA-xcq7-p3pf-p88h
+[26] https://www.soliditylang.org/blog/2026/10/22/yul-optimizer-knowledge-base-stale-bookkeeping-bug — Solidity Yul optimizer stale bookkeeping bug
