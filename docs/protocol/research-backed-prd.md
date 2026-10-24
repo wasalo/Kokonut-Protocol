@@ -2135,7 +2135,8 @@ The following is the implementation order Codex should follow.
 [x] Build and test offline EVM project factory prototype (not production deployment).
 [ ] Ensure permanent admin transfers to project Safe/DAO (factory rejects declared split authorities and verifies a bounded initial manifest; manifest completeness, Safe/DAO identity/governance, and future admin/upgrade behavior remain unverified).
 [x] Add Foundry fuzz tests for the offline factory prototype.
-[ ] Add Foundry invariant tests before production readiness.
+[x] Add handler-driven Foundry invariant tests for the offline factory prototype (32 runs, depth 32; fixture-only evidence, not production readiness).
+[ ] Add production component-specific Foundry invariant tests before production readiness.
 [x] Run Slither/Semgrep/Aderyn through CI.
 
 [x] Pin and assess Majeur at `7d7a36b5a25d31f7aa4d499b3a57ee98f4367fac` (offline source review only; integration and activation remain unchecked).
