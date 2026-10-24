@@ -21,6 +21,7 @@ The test toolchain is pinned in `contracts/evm/.foundry-version` and `contracts/
 ```sh
 make lint-evm
 make test-evm
+make audit-evm
 ```
 
-These targets do not connect to an EVM network. Do not treat a passing local test as evidence of deployment readiness.
+The Slither analysis uses the version pinned in `contracts/evm/.slither-version`; it reports no findings for the current factory. All targets run offline. They do not connect to an EVM network. Do not treat a passing local test or static analysis as evidence of deployment readiness.

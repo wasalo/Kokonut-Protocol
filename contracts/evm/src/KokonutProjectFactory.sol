@@ -2,7 +2,7 @@
 pragma solidity 0.8.38;
 
 interface IInitializableProjectComponent {
-    function initialize(bytes32 projectId, address projectAdmin) external;
+    function initialize(bytes32 projectId_, address projectAdmin_) external;
     function projectId() external view returns (bytes32);
     function projectAdmin() external view returns (address);
 }
@@ -71,6 +71,8 @@ contract KokonutProjectFactory {
         emit ProjectComponentDeployed(projectId, predicted, projectAdmin, creationCodeHash);
 
         bytes memory initCode = creationCode;
+        // CREATE2 is required to keep project addresses deterministic.
+        // slither-disable-next-line assembly
         assembly ("memory-safe") {
             component := create2(0, add(initCode, 0x20), mload(initCode), salt)
         }

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: lint test lint-near test-near build-near lint-evm test-evm ci
+.PHONY: lint test lint-near test-near build-near lint-evm test-evm audit-evm ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -24,4 +24,7 @@ lint-evm:
 test-evm:
 	cd contracts/evm && forge test
 
-ci: lint test lint-near test-near build-near lint-evm test-evm
+audit-evm:
+	cd contracts/evm && slither . --foundry-out-directory out
+
+ci: lint test lint-near test-near build-near lint-evm test-evm audit-evm

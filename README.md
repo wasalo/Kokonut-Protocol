@@ -10,14 +10,16 @@ See [ADR 0001](docs/adr/0001-protocol-boundary-and-chain-profiles.md), the [NEAR
 
 ## Development
 
-Requires Python 3.10+ and the development dependencies in `requirements-dev.txt` (JSON Schema validation, EVM Keccak, secp256k1 signature, and RLP support). EVM contract checks also require the Foundry version pinned in `contracts/evm/.foundry-version`.
+Requires Python 3.10+ and the development dependencies in `requirements-dev.txt` (JSON Schema validation, EVM Keccak, secp256k1 signature, and RLP support). EVM contract checks require the Foundry version pinned in `contracts/evm/.foundry-version`; the Slither analysis target uses the pinned version in `contracts/evm/.slither-version`.
 
 ```sh
 python3 -m pip install -r requirements-dev.txt
+python3 -m pip install "slither-analyzer==$(< contracts/evm/.slither-version)"
 foundryup --install "$(tr -d '\\r\\n' < contracts/evm/.foundry-version)"
 make lint
 make test
 make lint-evm
 make test-evm
+make audit-evm
 make ci
 ```
