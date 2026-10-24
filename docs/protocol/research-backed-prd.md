@@ -444,9 +444,7 @@ The first release will not:
 
 ### Branded system model
 
-![Kokonut Kernel and NEAR Web3 Hub](sandbox:/mnt/data/kokonut_kernel_near_hub.png)
-
-[Download the vector SVG](sandbox:/mnt/data/kokonut_kernel_near_hub.svg)
+> Note: The original PNG/SVG assets for this figure were supplied as sandbox-only paths and are not present in this repository; no replacement asset is available here.
 
 The core design principle remains:
 
@@ -1442,9 +1440,7 @@ but produce a **proposal**, never direct financial authority.
 
 ### Deployment profiles
 
-![Simplified Kokonut deployment profiles](sandbox:/mnt/data/kokonut_deployment_profiles.png)
-
-[Download the vector SVG](sandbox:/mnt/data/kokonut_deployment_profiles.svg)
+> Note: The original PNG/SVG assets for this figure were supplied as sandbox-only paths and are not present in this repository; no replacement asset is available here.
 
 The requested profiles should become first-class supported configurations.
 
@@ -2083,7 +2079,7 @@ The implementation can begin without settling all tokenomics, but these decision
 
 **Upgrade authority.** Approve immutable versus upgradeable components and the applicable timelock/multisig.
 
-**Majeur version.** Pin the exact reviewed commit/deployment only after its pilot security review.
+**Majeur version.** The research pin and source-level fit assessment are recorded in [majeur-assessment.md](majeur-assessment.md) for commit `7d7a36b5a25d31f7aa4d499b3a57ee98f4367fac`. This is not deployment verification, an independent audit, integration, pilot approval, or production activation; any approved pilot requires product/governance approval and review of the exact deployed code and configuration.
 
 **First destination chains.** The Protocol architecture intentionally does not make one strategic chain permanent. Initial EVM testing should use two environments to prove portability; production chain selection should follow actual ecosystem/community opportunities.
 
@@ -2136,12 +2132,13 @@ The following is the implementation order Codex should follow.
 [ ] Add canonical claim/attestation federation.
 [ ] Verify no attestation double counting.
 
-[ ] Create project factory contracts.
+[x] Build and test offline EVM project factory prototype (not production deployment).
 [ ] Ensure permanent admin transfers to project Safe/DAO (factory authorities are now excluded as admin; Safe/DAO identity and component admin permanence remain unverified).
-[ ] Add Foundry fuzz/invariant tests.
+[x] Add Foundry fuzz tests for the offline factory prototype.
+[ ] Add Foundry invariant tests before production readiness.
 [x] Run Slither/Semgrep/Aderyn through CI.
 
-[ ] Pin and assess Majeur.
+[x] Pin and assess Majeur at `7d7a36b5a25d31f7aa4d499b3a57ee98f4367fac` (offline source review only; integration and activation remain unchecked).
 [ ] Create isolated Revenue Container pilot.
 [ ] Implement revenue-period accounting.
 [ ] Implement versioned waterfall policy.
