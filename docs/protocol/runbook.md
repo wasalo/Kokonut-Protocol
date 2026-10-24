@@ -91,6 +91,10 @@ The offline recovery tests exercise these restart windows with a fake RPC and a 
 
 These tests establish local recovery behavior only. They do not exercise a live NEAR signer, a live destination RPC, production database durability, KI event leases, or operational access controls.
 
+## Nonce-store backup boundary
+
+The adapter exposes `NonceManager.backup_to(destination)` and an offline test verifies SQLite snapshot/restore of nonce leases and exact signed bytes. This is a storage primitive, not an operator backup procedure. The destination is caller-managed and contains sensitive transaction bytes; protect it with restrictive access controls. Do not copy a live database or WAL sidecars. Backup scheduling, retention, off-host storage, and a production restore rehearsal remain open.
+
 ## Local validation
 
 From the repository root, run the offline checks:

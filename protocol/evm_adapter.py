@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import threading
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from eth_hash.auto import keccak
 from eth_keys import keys
@@ -300,6 +301,19 @@ class NonceManager:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def backup_to(self, destination: sqlite3.Connection) -> None:
+        """Back up a consistent snapshot to a caller-owned, separate connection.
+
+        The destination contains raw signed transactions; its path and access
+        controls remain the caller's responsibility.
+        """
+        if destination is self._connection:
+            raise ValueError("backup destination must be a separate database connection")
+        if destination.in_transaction:
+            raise ValueError("backup destination must not have an active transaction")
+        with self._lock:
+            self._connection.backup(destination)
 
     def reserve_exact(
         self, chain_id: str, sender: str, request_id: str, nonce: int, pending_nonce: int

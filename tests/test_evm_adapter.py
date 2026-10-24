@@ -1,17 +1,20 @@
 import json
-from pathlib import Path
+import sqlite3
+import tempfile
 import unittest
+from contextlib import closing
+from pathlib import Path
 
+import rlp
 from eth_hash.auto import keccak
 from eth_keys import keys
-import rlp
 
 from protocol.evm_adapter import (
+    TESTNETS,
     EvmAdapter,
     EvmNetworkConfig,
     NonceManager,
     PreparedTransaction,
-    TESTNETS,
     encode_signed_eip1559,
     hash_expected_effect,
     verify_expected_effect,
@@ -282,6 +285,68 @@ class EvmAdapterTests(unittest.TestCase):
         manager.mark_broadcast("req-1", "0x" + "aa" * 32)
         manager.mark_confirmed("req-1", "0x" + "aa" * 32)
         self.assertEqual(manager.get("req-1")["state"], "confirmed")
+
+    def test_nonce_manager_backup_restore_preserves_lease_state_and_signed_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.sqlite"
+            backup_path = Path(directory) / "backup.sqlite"
+            restored_path = Path(directory) / "restored.sqlite"
+            sender = "0x" + "11" * 20
+            source = NonceManager(str(source_path))
+            source.reserve_exact("84532", sender, "req-broadcast", 7, 7)
+            broadcast_bytes = "0x02" + "ab" * 80
+            broadcast_hash = "0x" + "cd" * 32
+            source.mark_signed("req-broadcast", broadcast_bytes)
+            source.mark_broadcast("req-broadcast", broadcast_hash)
+            source.reserve_exact("84532", sender, "req-confirmed", 8, 8)
+            confirmed_bytes = "0x02" + "ef" * 80
+            confirmed_hash = "0x" + "12" * 32
+            source.mark_signed("req-confirmed", confirmed_bytes)
+            source.mark_broadcast("req-confirmed", confirmed_hash)
+            source.mark_confirmed("req-confirmed", confirmed_hash)
+
+            backup_connection = sqlite3.connect(str(backup_path))
+            try:
+                source.backup_to(backup_connection)
+            finally:
+                backup_connection.close()
+                source.close()
+
+            with closing(sqlite3.connect(str(backup_path))) as backup_connection, closing(
+                sqlite3.connect(str(restored_path))
+            ) as restored_connection:
+                backup_connection.backup(restored_connection)
+
+            restored = NonceManager(str(restored_path))
+            try:
+                broadcast = restored.get("req-broadcast")
+                if broadcast is None:
+                    self.fail("broadcast lease was not restored")
+                self.assertEqual(broadcast["state"], "broadcast")
+                self.assertEqual(broadcast["raw_transaction"], broadcast_bytes)
+                self.assertEqual(broadcast["transaction_hash"], broadcast_hash)
+
+                confirmed = restored.get("req-confirmed")
+                if confirmed is None:
+                    self.fail("confirmed lease was not restored")
+                self.assertEqual(confirmed["state"], "confirmed")
+                self.assertEqual(confirmed["raw_transaction"], confirmed_bytes)
+                self.assertEqual(confirmed["transaction_hash"], confirmed_hash)
+                self.assertEqual(restored.reserve_next("84532", sender, "req-next", 7), 9)
+            finally:
+                restored.close()
+
+    def test_nonce_manager_backup_rejects_unsafe_destination_connections(self):
+        manager = NonceManager(":memory:")
+        self.addCleanup(manager.close)
+        with self.assertRaisesRegex(ValueError, "separate database connection"):
+            manager.backup_to(manager._connection)
+
+        destination = sqlite3.connect(":memory:")
+        self.addCleanup(destination.close)
+        destination.execute("BEGIN")
+        with self.assertRaisesRegex(ValueError, "active transaction"):
+            manager.backup_to(destination)
 
     def test_confirmed_nonce_is_never_released_for_reuse(self):
         manager = NonceManager(":memory:")

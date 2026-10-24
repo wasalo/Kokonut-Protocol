@@ -2153,7 +2153,8 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Run two-network EVM end-to-end test.
 [x] Add offline NEAR signing-failure unit tests (no live signer request).
 [x] Add fake-RPC/reorg/nonce failure and recovery tests (no live network).
-[ ] Run backup/restore tests.
+[x] Test offline SQLite nonce-store backup/restore (lease states and exact signed bytes); production backup/restore rehearsal remains open.
+[ ] Design and rehearse production backup/restore for the shared durable nonce/event store.
 
 [ ] Replace AMD64-only PostGIS candidate reference.
 [ ] Build amd64 + arm64 manifests.

@@ -6,6 +6,13 @@ Chain-neutral policy and interoperability layer for Kokonut Network. Kokonut Int
 
 This repository establishes chain capabilities and an initial NEAR Hub registry, policy, execution-approval, and testnet-only signing flow. It includes schema-validated examples for a NEAR hub and two proposed EVM test destinations; a Rust contract for chain/project profiles, versioned signer bindings and execution policies, policy-checked execution proposals with replay protection and approval quorum; a configurable asynchronous NEAR Chain Signatures request; an offline EIP-1559 signing-payload verifier; a testnet-only EVM transaction adapter; and a local-only EVM project-factory prototype. These remain control-plane and client-side primitives: no contract or adapter has been deployed or used for a live destination transaction, and the Kokonut Intelligence bridge/reconciliation is not implemented. The examples are proposed configurations, not production approvals.
 
+## Current status and boundaries
+
+- The tracked [Protocol PRD](docs/protocol/research-backed-prd.md) distinguishes offline prototype evidence from KI integration, testnet operation, production readiness, and independent review.
+- KI remains canonical for farm operations, accounting, evidence, and approvals. Do not add KI migrations or bridge integration until the KI refactor is finalized and Wasabi specifies the KI PR target.
+- No live signing, destination-chain broadcast, deployment, or production financial activity is authorized by this repository. Obtain separate authorization for any such operation.
+- The EVM project factory and its invariant tests use fixtures only. They do not establish a real component's manifest completeness, Safe/DAO identity, governance suitability, or permanent authority.
+
 See [ADR 0001](docs/adr/0001-protocol-boundary-and-chain-profiles.md), the [NEAR execution-controller notes](docs/protocol/execution-controller.md), the [testnet EVM adapter notes](docs/protocol/evm-adapter.md), the [offline EVM factory prototype](docs/protocol/evm-factory.md), the [Majeur source pin and fit assessment](docs/protocol/majeur-assessment.md), the [testnet relayer orchestration notes](docs/protocol/relayer.md), the [development/testnet recovery runbook](docs/protocol/runbook.md), the [Protocol threat model](docs/protocol/threat-model.md), the [agent proposal-only boundary](docs/protocol/agent-boundary.md), the [offline Revenue Container simulator](docs/protocol/revenue-containers.md), and [AGENTS.md](AGENTS.md) for architecture, execution invariants, adapter lifecycle, orchestration, recovery constraints, and contribution rules.
 
 ## Development

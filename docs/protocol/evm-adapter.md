@@ -12,11 +12,17 @@
 
 The NEAR call only obtains a signature. Transaction construction, nonce leasing, simulation, broadcast, receipt/finality, and effect checks are separate client-side responsibilities. An EVM transaction hash is not proof of finality, and EVM effect verification is not reconciliation into Kokonut Intelligence.
 
+## Nonce-store snapshot and recovery boundary
+
+`NonceManager.backup_to(destination)` takes a consistent SQLite online snapshot while holding the manager's in-process lock. The destination is supplied by the caller and must be a separate, idle SQLite connection. It contains exact signed transaction bytes and lease metadata, so provision the destination with restrictive filesystem access and keep it out of source control, tickets, and chat. Do not copy an active database file or WAL sidecars as an alternative.
+
+The automated test backs up a database containing broadcast and confirmed leases, restores the snapshot into a fresh database, verifies the exact signed bytes and transaction hashes, and confirms the restored nonce history does not reuse an earlier nonce. This demonstrates local SQLite snapshot mechanics only. It does not provide backup scheduling, encryption/key management, off-host retention, corruption monitoring, HA/failover, lease ownership across hosts, or an operator restore runbook. The development/testnet runbook remains non-production.
+
 ## Safety and current limits
 
 - These profiles and tests are testnet-only; no live EVM RPC, signing request, transaction, or broadcast was performed as part of the local test suite.
 - The adapter receives a signature result; it does not control NEAR keys or administer the Chain Signatures contract/public key.
-- `NonceManager` stores raw signed transactions and lease metadata in SQLite. Use an access-controlled, durable database path; back it up and protect it as sensitive operational data.
+- `NonceManager` stores raw signed transactions and lease metadata in SQLite. `NonceManager.backup_to(destination)` uses SQLite's online backup API under the manager lock to produce a consistent snapshot into a caller-owned, separate, idle connection. The destination contains sensitive signed bytes; the caller must securely create and restrict the destination file. Do not copy an active database file or its WAL sidecars as a substitute. The test suite exercises snapshot, restore into a fresh database, and preservation of broadcast/confirmed lease state and exact signed bytes; this is not a production backup/restore service or operator procedure.
 - The transaction must already commit to `gas_limit`, `signing_payload_hash`, `signer_key_version`, and `expected_effect_hash`. The adapter does not amend an approved request.
 - If the RPC does not expose a finalized block, a confirmation threshold is informational only. The adapter will not mark the request finalized or reconcile it from that threshold.
 - Kokonut Intelligence remains canonical for operational, accounting, evidence, and human-approval records. The KI bridge/reconciliation remains a separate integration step.
