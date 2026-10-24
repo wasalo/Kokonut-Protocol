@@ -6,6 +6,7 @@ import {KokonutProjectFactory} from "../src/KokonutProjectFactory.sol";
 interface Vm {
     function expectRevert(bytes4 selector) external;
     function prank(address caller) external;
+    function assume(bool condition) external;
 }
 
 contract MockProjectComponent {
@@ -27,8 +28,8 @@ contract MockMismatchingProjectComponent {
     bytes32 public projectId;
     address public projectAdmin;
 
-    function initialize(bytes32, address projectAdmin_) external {
-        projectId = bytes32(uint256(1));
+    function initialize(bytes32 projectId_, address projectAdmin_) external {
+        projectId = projectId_ ^ bytes32(uint256(1));
         projectAdmin = projectAdmin_;
     }
 }
@@ -144,6 +145,51 @@ contract KokonutProjectFactoryTests {
         vm.prank(DEPLOYMENT_AUTHORITY);
         vm.expectRevert(KokonutProjectFactory.InvalidProjectAdmin.selector);
         factory.deployProject(PROJECT_ID, address(0xCAFE), initCode);
+    }
+
+    function testFuzzDeploymentMatchesPredictedAddress(bytes32 projectId) public {
+        vm.assume(projectId != bytes32(0));
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        bytes32 codeHash = keccak256(initCode);
+        KokonutProjectFactory factory = _newFactory(codeHash);
+        address predicted = factory.predictProjectAddress(projectId, codeHash);
+
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        address deployed = factory.deployProject(projectId, PROJECT_ADMIN, initCode);
+
+        require(deployed == predicted, "CREATE2 address mismatch");
+        require(factory.projectById(projectId) == predicted, "registered address mismatch");
+    }
+
+    function testFuzzDistinctProjectIdsHaveDistinctPredictedAddresses(bytes32 projectId, bytes32 otherProjectId)
+        public
+    {
+        vm.assume(projectId != bytes32(0));
+        vm.assume(otherProjectId != bytes32(0));
+        vm.assume(projectId != otherProjectId);
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        bytes32 codeHash = keccak256(initCode);
+        KokonutProjectFactory factory = _newFactory(codeHash);
+
+        address predicted = factory.predictProjectAddress(projectId, codeHash);
+        address otherPredicted = factory.predictProjectAddress(otherProjectId, codeHash);
+
+        require(predicted != otherPredicted, "distinct IDs collided");
+    }
+
+    function testFuzzFailedInitializationRollsBackAddressAndRegistration(bytes32 projectId) public {
+        vm.assume(projectId != bytes32(0));
+        bytes memory initCode = type(MockMismatchingProjectComponent).creationCode;
+        bytes32 codeHash = keccak256(initCode);
+        KokonutProjectFactory factory = _newFactory(codeHash);
+        address predicted = factory.predictProjectAddress(projectId, codeHash);
+
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        vm.expectRevert(KokonutProjectFactory.ProjectInitializationMismatch.selector);
+        factory.deployProject(projectId, PROJECT_ADMIN, initCode);
+
+        require(factory.projectById(projectId) == address(0), "failed deployment was registered");
+        require(predicted.code.length == 0, "failed deployment code was retained");
     }
 
     function testConfigurationAndDeploymentAuthoritiesMustBeDistinct() public {
