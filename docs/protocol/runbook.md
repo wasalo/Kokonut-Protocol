@@ -93,7 +93,7 @@ These tests establish local recovery behavior only. They do not exercise a live 
 
 ## Nonce-store backup boundary
 
-The adapter exposes `NonceManager.backup_to(destination)` and an offline test verifies SQLite snapshot/restore of nonce leases and exact signed bytes. This is a storage primitive, not an operator backup procedure. The destination is caller-managed and contains sensitive transaction bytes; protect it with restrictive access controls. Do not copy a live database or WAL sidecars. Backup scheduling, retention, off-host storage, and a production restore rehearsal remain open.
+The adapter exposes `NonceManager.backup_to(destination)` and an offline test verifies SQLite snapshot/restore of nonce leases and exact signed bytes. The adapter creates file-backed databases as owner-only (`0600`), rejects symlinked database paths and group/world-writable parent directories, and refuses existing files with broader permissions. Create backup destinations as owner-only files in non-group/world-writable directories; protect them as sensitive transaction material. Do not copy a live database or WAL sidecars. Backup scheduling, retention, off-host storage, and a production restore rehearsal remain open.
 
 ## Local validation
 

@@ -1047,11 +1047,59 @@ impl KokonutProtocolHub {
             .get(&request_id)
             .cloned()
             .unwrap_or_else(|| env::panic_str("execution request not found"));
-        assert_eq!(
-            record.signature_status,
-            SignatureStatus::Pending,
-            "signature request is not pending"
+        if record.signature_status != SignatureStatus::Pending
+            || record.status != ExecutionStatus::Approved
+        {
+            if record.signature_status == SignatureStatus::Pending {
+                record.signature_status = SignatureStatus::Failed;
+                record.signature_response = None;
+                self.execution_requests.insert(request_id.clone(), record);
+            }
+            return None;
+        }
+        if env::block_timestamp() >= record.expires_at_ns {
+            record.status = ExecutionStatus::Expired;
+            record.signature_status = SignatureStatus::Failed;
+            record.signature_response = None;
+            self.execution_requests
+                .insert(request_id.clone(), record.clone());
+            self.emit_event(
+                "execution_expired",
+                near_sdk::serde_json::json!({ "request_id": request_id }),
+            );
+            return None;
+        }
+        let active_policy = self.get_active_execution_policy(
+            record.request.project_id.clone(),
+            record.request.chain_namespace.clone(),
+            record.request.chain_id.clone(),
         );
+        if active_policy.is_none_or(|policy| policy.version != record.request.policy_version) {
+            record.signature_status = SignatureStatus::Failed;
+            record.signature_response = None;
+            self.execution_requests.insert(request_id.clone(), record);
+            self.emit_event(
+                "signature_failed",
+                near_sdk::serde_json::json!({
+                    "request_id": request_id,
+                    "reason": "execution policy changed while signature was pending"
+                }),
+            );
+            return None;
+        }
+        if self.paused {
+            record.signature_status = SignatureStatus::Failed;
+            record.signature_response = None;
+            self.execution_requests.insert(request_id.clone(), record);
+            self.emit_event(
+                "signature_failed",
+                near_sdk::serde_json::json!({
+                    "request_id": request_id,
+                    "reason": "protocol paused while signature was pending"
+                }),
+            );
+            return None;
+        }
         match env::promise_result_checked(0, 4096) {
             Ok(bytes) => {
                 let response =
@@ -1148,6 +1196,10 @@ impl KokonutProtocolHub {
         );
         if env::block_timestamp() >= record.expires_at_ns {
             record.status = ExecutionStatus::Expired;
+            if record.signature_status == SignatureStatus::Pending {
+                record.signature_status = SignatureStatus::Failed;
+                record.signature_response = None;
+            }
             self.execution_requests.insert(request_id.clone(), record);
             self.emit_event(
                 "execution_expired",
@@ -1163,6 +1215,10 @@ impl KokonutProtocolHub {
             "execution request cannot be cancelled"
         );
         record.status = ExecutionStatus::Cancelled;
+        if record.signature_status == SignatureStatus::Pending {
+            record.signature_status = SignatureStatus::Failed;
+            record.signature_response = None;
+        }
         self.execution_requests.insert(request_id.clone(), record);
         self.emit_event(
             "execution_cancelled",
@@ -1188,6 +1244,10 @@ impl KokonutProtocolHub {
             "execution request has not expired"
         );
         record.status = ExecutionStatus::Expired;
+        if record.signature_status == SignatureStatus::Pending {
+            record.signature_status = SignatureStatus::Failed;
+            record.signature_response = None;
+        }
         self.execution_requests.insert(request_id.clone(), record);
         self.emit_event(
             "execution_expired",
@@ -1871,6 +1931,138 @@ mod tests {
             hub.request_signature(request_id.to_owned(), action_hash)
         }));
         assert!(retry.is_err());
+    }
+
+    #[test]
+    fn cancellation_invalidates_a_pending_signature_callback() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c71";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+        set_predecessor_with_near_deposit("operator.near", 1);
+        hub.request_signature(request_id.to_owned(), action_hash)
+            .as_return()
+            .detach();
+
+        set_predecessor("operator.near");
+        hub.cancel_execution(request_id.to_owned());
+        set_callback_promise_result(near_sdk::PromiseResult::Successful(
+            br#"{"big_r":{"affine_point":"04"},"s":{"scalar":"02"},"recovery_id":0}"#.to_vec(),
+        ));
+
+        let callback_result = hub.on_signature_result(request_id.to_owned());
+        let record = hub.get_execution_request(request_id.to_owned()).unwrap();
+
+        assert!(callback_result.is_none());
+        assert_eq!(record.status, ExecutionStatus::Cancelled);
+        assert_eq!(record.signature_status, SignatureStatus::Failed);
+        assert!(record.signature_response.is_none());
+    }
+
+    #[test]
+    fn expiry_invalidates_a_pending_signature_callback() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c72";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+        set_predecessor_with_near_deposit("operator.near", 1);
+        hub.request_signature(request_id.to_owned(), action_hash)
+            .as_return()
+            .detach();
+
+        set_predecessor_at("stranger.near", u64::MAX);
+        hub.expire_execution(request_id.to_owned());
+        set_callback_promise_result(near_sdk::PromiseResult::Successful(
+            br#"{"big_r":{"affine_point":"04"},"s":{"scalar":"02"},"recovery_id":0}"#.to_vec(),
+        ));
+
+        let callback_result = hub.on_signature_result(request_id.to_owned());
+        let record = hub.get_execution_request(request_id.to_owned()).unwrap();
+
+        assert!(callback_result.is_none());
+        assert_eq!(record.status, ExecutionStatus::Expired);
+        assert_eq!(record.signature_status, SignatureStatus::Failed);
+        assert!(record.signature_response.is_none());
+    }
+
+    #[test]
+    fn signature_callback_rejects_policy_version_changed_while_pending() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c73";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+        set_predecessor_with_near_deposit("operator.near", 1);
+        hub.request_signature(request_id.to_owned(), action_hash)
+            .as_return()
+            .detach();
+
+        set_predecessor(ADMIN);
+        configure_execution_policy(&mut hub, "policy-v2");
+        set_callback_promise_result(near_sdk::PromiseResult::Successful(
+            br#"{"big_r":{"affine_point":"04"},"s":{"scalar":"02"},"recovery_id":0}"#.to_vec(),
+        ));
+
+        let callback_result = hub.on_signature_result(request_id.to_owned());
+        let record = hub.get_execution_request(request_id.to_owned()).unwrap();
+
+        assert!(callback_result.is_none());
+        assert_eq!(record.status, ExecutionStatus::Approved);
+        assert_eq!(record.signature_status, SignatureStatus::Failed);
+        assert!(record.signature_response.is_none());
+    }
+
+    #[test]
+    fn signature_callback_expires_request_at_deadline_without_expire_call() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c74";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+        set_predecessor_with_near_deposit("operator.near", 1);
+        hub.request_signature(request_id.to_owned(), action_hash)
+            .as_return()
+            .detach();
+        let expires_at_ns = hub
+            .get_execution_request(request_id.to_owned())
+            .expect("request exists")
+            .expires_at_ns;
+        #[allow(deprecated)]
+        testing_env_with_promise_results(
+            VMContextBuilder::new()
+                .block_timestamp(expires_at_ns)
+                .build(),
+            near_sdk::PromiseResult::Successful(
+                br#"{"big_r":{"affine_point":"04"},"s":{"scalar":"02"},"recovery_id":0}"#.to_vec(),
+            ),
+        );
+
+        let callback_result = hub.on_signature_result(request_id.to_owned());
+        let record = hub.get_execution_request(request_id.to_owned()).unwrap();
+
+        assert!(callback_result.is_none());
+        assert_eq!(record.status, ExecutionStatus::Expired);
+        assert_eq!(record.signature_status, SignatureStatus::Failed);
+        assert!(record.signature_response.is_none());
+    }
+
+    #[test]
+    fn signature_callback_is_suppressed_when_protocol_pauses_while_pending() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c75";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+        set_predecessor_with_near_deposit("operator.near", 1);
+        hub.request_signature(request_id.to_owned(), action_hash)
+            .as_return()
+            .detach();
+
+        set_predecessor(ADMIN);
+        hub.pause();
+        set_callback_promise_result(near_sdk::PromiseResult::Successful(
+            br#"{"big_r":{"affine_point":"04"},"s":{"scalar":"02"},"recovery_id":0}"#.to_vec(),
+        ));
+
+        let callback_result = hub.on_signature_result(request_id.to_owned());
+        let record = hub.get_execution_request(request_id.to_owned()).unwrap();
+
+        assert!(callback_result.is_none());
+        assert_eq!(record.status, ExecutionStatus::Approved);
+        assert_eq!(record.signature_status, SignatureStatus::Failed);
+        assert!(record.signature_response.is_none());
     }
 
     #[test]

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import stat
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -277,11 +279,61 @@ class FinalityResult:
     finalized: bool = False
 
 
+def _open_nonce_database(database_path: str) -> sqlite3.Connection:
+    options = {"timeout": 30, "isolation_level": None, "check_same_thread": False}
+    if database_path == ":memory:":
+        return sqlite3.connect(database_path, **options)
+
+    absolute_path = os.path.abspath(os.fspath(database_path))
+    parent_path = os.path.dirname(absolute_path)
+    parent_info = os.stat(parent_path, follow_symlinks=False)
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_mode & 0o022:
+        raise PermissionError("nonce database directory must not be group/world-writable")
+
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise PermissionError("platform cannot safely reject a symlinked nonce database")
+    flags = os.O_RDWR | os.O_CREAT | no_follow | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(absolute_path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PermissionError("nonce database path must not be a symlink") from None
+        raise
+
+    try:
+        opened_info = os.fstat(descriptor)
+        opened_mode = stat.S_IMODE(opened_info.st_mode)
+        if (
+            not stat.S_ISREG(opened_info.st_mode)
+            or opened_info.st_uid != os.geteuid()
+            or opened_mode & 0o077
+            or opened_mode & 0o600 != 0o600
+        ):
+            raise PermissionError("nonce database must be an owner-only regular file")
+
+        connection = sqlite3.connect(absolute_path, **options)
+        try:
+            current_info = os.stat(absolute_path, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(current_info.st_mode)
+                or current_info.st_dev != opened_info.st_dev
+                or current_info.st_ino != opened_info.st_ino
+            ):
+                raise PermissionError("nonce database path changed while opening")
+        except Exception:
+            connection.close()
+            raise
+        return connection
+    finally:
+        os.close(descriptor)
+
+
 class NonceManager:
     """SQLite-backed nonce leases; signed bytes are retained for safe retries."""
 
     def __init__(self, database_path: str):
-        self._connection = sqlite3.connect(database_path, timeout=30, isolation_level=None, check_same_thread=False)
+        self._connection = _open_nonce_database(database_path)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._connection.execute("PRAGMA journal_mode=WAL")

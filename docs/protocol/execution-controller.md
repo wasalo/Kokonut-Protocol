@@ -34,7 +34,7 @@ The contract requires a canonical 32-byte digest that is a valid secp256k1 scala
 - The proposer or administrator may cancel before expiry. Anyone may mark an expired request `Expired`; approval and cancellation also transition a request to `Expired` if its deadline has passed.
 - Execution statuses are `AwaitingApproval`, `Approved`, `Cancelled`, and `Expired`; the separate signature statuses are `NotRequested`, `Pending`, `Issued`, and `Failed`.
 
-A failed external request may be retried; pending and issued requests cannot be requested again. Cancelling or expiring an execution after a signature request does not revoke a signature that the external signer has already produced. Relayers must check current NEAR state and policy before using it.
+A failed external request may be retried; pending and issued requests cannot be requested again. The NEAR callback suppresses a pending result if the request is cancelled or expired, reaches its deadline, the active execution-policy version changes, or the protocol is paused. That on-chain invalidation clears pending signature material but cannot revoke a cryptographic signature already issued by the external signer. Activating a new signer version preserves the older binding and does not by itself invalidate an already-pending request; emergency invalidation currently requires pause or cancellation. Production consumers must re-read approval, policy, signer-version semantics, expiry, and pause state before any destination broadcast.
 
 ## Explicit limits
 

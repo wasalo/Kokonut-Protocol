@@ -1,5 +1,7 @@
 import json
+import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 from contextlib import closing
@@ -274,6 +276,56 @@ class EvmAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "response shape"):
             encode_signed_eip1559(REQUEST, CALLDATA, signature, "0x" + "7e5f4552091a69125d5dfcb7b8c2659029395bdf")
 
+    def test_nonce_manager_creates_database_with_owner_only_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "nonce.sqlite"
+            previous_umask = os.umask(0o022)
+            try:
+                manager = NonceManager(str(database_path))
+            finally:
+                os.umask(previous_umask)
+            try:
+                self.assertEqual(stat.S_IMODE(database_path.stat().st_mode), 0o600)
+                manager.reserve_exact("84532", "0x" + "11" * 20, "req", 0, 0)
+                sidecars = [
+                    Path(f"{database_path}{suffix}")
+                    for suffix in ("-wal", "-shm")
+                    if Path(f"{database_path}{suffix}").exists()
+                ]
+                self.assertTrue(sidecars)
+                for sidecar in sidecars:
+                    self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode) & 0o077, 0)
+            finally:
+                manager.close()
+
+    def test_nonce_manager_rejects_existing_database_with_unsafe_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "nonce.sqlite"
+            database_path.touch(mode=0o600)
+            database_path.chmod(0o644)
+
+            with self.assertRaisesRegex(PermissionError, "owner-only"):
+                NonceManager(str(database_path))
+
+    def test_nonce_manager_rejects_group_writable_parent_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unsafe_directory = Path(directory) / "shared"
+            unsafe_directory.mkdir()
+            unsafe_directory.chmod(0o770)
+
+            with self.assertRaisesRegex(PermissionError, "directory"):
+                NonceManager(str(unsafe_directory / "nonce.sqlite"))
+
+    def test_nonce_manager_rejects_symlinked_database_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target_path = Path(directory) / "target.sqlite"
+            link_path = Path(directory) / "nonce.sqlite"
+            target_path.touch(mode=0o600)
+            link_path.symlink_to(target_path)
+
+            with self.assertRaisesRegex(PermissionError, "symlink"):
+                NonceManager(str(link_path))
+
     def test_nonce_manager_persists_reservation_and_state_transitions(self):
         manager = NonceManager(":memory:")
         self.addCleanup(manager.close)
@@ -291,6 +343,8 @@ class EvmAdapterTests(unittest.TestCase):
             source_path = Path(directory) / "source.sqlite"
             backup_path = Path(directory) / "backup.sqlite"
             restored_path = Path(directory) / "restored.sqlite"
+            backup_path.touch(mode=0o600)
+            restored_path.touch(mode=0o600)
             sender = "0x" + "11" * 20
             source = NonceManager(str(source_path))
             source.reserve_exact("84532", sender, "req-broadcast", 7, 7)

@@ -10,7 +10,7 @@ The security boundary spans:
 
 1. Kokonut Intelligence (KI), which remains canonical for operational truth, evidence, accounting, and human approvals.
 2. The Protocol client/relayer and its durable nonce-lease store.
-3. The NEAR Hub, which checks project, policy, signer, approval, expiry, pause, and replay conditions before requesting a signature.
+3. The NEAR Hub, which checks project, policy, signer, approval, expiry, pause, and replay conditions before requesting a signature and rechecks execution status, active policy version, expiry, and pause state when the asynchronous signature callback resolves.
 4. NEAR Chain Signatures, which can produce a signature but do not broadcast or finalize a destination transaction.
 5. Destination RPCs and chains, which construct, accept, finalize, and expose local state.
 6. Project-local factories, Safe/DAO controls, and treasury boundaries.

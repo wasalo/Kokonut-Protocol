@@ -34,8 +34,10 @@ audit-evm:
 
 # Keep the constructor nonpayable: accepting ETH is not part of this factory's API.
 # The upstream performance-only rule recommends payable constructors for gas savings.
+# The runner fetches the licensed public pack to a temporary file and fails closed
+# if its reviewed digest changes; never vendor rule definitions in this repo.
 audit-semgrep:
-	SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 $(SEMGREP) scan --config p/smart-contracts --exclude-rule solidity.performance.non-payable-constructor.non-payable-constructor --error contracts/evm/src
+	SEMGREP="$(SEMGREP)" bash scripts/audit-semgrep-pinned.sh
 
 audit-aderyn: lint-evm
 	cd contracts/evm && aderyn . --highs-only --output out/aderyn-high.json
