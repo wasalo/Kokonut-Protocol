@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: lint test lint-near test-near build-near lint-evm test-evm audit-evm audit-aderyn audit-semgrep ci
+.PHONY: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -24,6 +24,10 @@ lint-evm:
 test-evm:
 	cd contracts/evm && forge test
 
+test-evm-anvil: lint-evm
+	command -v anvil >/dev/null
+	PYTHONPATH=.:tests $(PYTHON) tests/evm_anvil_integration.py -v
+
 audit-evm:
 	cd contracts/evm && slither . --foundry-out-directory out
 
@@ -36,4 +40,4 @@ audit-aderyn: lint-evm
 	cd contracts/evm && aderyn . --highs-only --output out/aderyn-high.json
 	$(PYTHON) -c 'import json, pathlib; report=json.loads(pathlib.Path("contracts/evm/out/aderyn-high.json").read_text()); count=report["issue_count"]["high"]; print(f"Aderyn high-severity findings: {count}"); raise SystemExit(count != 0)'
 
-ci: lint test lint-near test-near build-near lint-evm test-evm audit-evm audit-semgrep audit-aderyn
+ci: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-aderyn

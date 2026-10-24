@@ -9,11 +9,11 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-near-sdk = "=5.29.1"
+near-sdk = { version = "=5.29.1", default-features = false }
 time = { version = "=0.3.55", features = ["parsing"] }
 
 [dev-dependencies]
-near-sdk = { version = "=5.29.1", features = ["unit-testing"] }
+near-sdk = { version = "=5.29.1", default-features = false, features = ["unit-testing"] }
 
 [profile.release]
 codegen-units = 1

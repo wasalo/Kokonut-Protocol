@@ -2135,7 +2135,11 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Verify no attestation double counting in the KI integration (deferred with KI work).
 
 [x] Build and test offline EVM project factory prototype (not production deployment).
-[ ] Ensure permanent admin transfers to project Safe/DAO (factory rejects declared split authorities and verifies a bounded initial manifest; manifest completeness, Safe/DAO identity/governance, and future admin/upgrade behavior remain unverified).
+[ ] Ensure permanent admin transfers to project Safe/DAO (blocked until a real EVM component and intended project-governance target are identified).
+  - [ ] Pin the exact component source/version and intended network/deployment configuration.
+  - [ ] Identify the exact intended project Safe/DAO address and validate its owners, threshold, modules/guards, fallback handler, and governance policy.
+  - [ ] Trace every privileged path, including initializer/reinitializer, roles, inherited controls, proxy/beacon/implementation/admin, upgrade, and delegatecall; prove the manifest is complete.
+  - [ ] Test the real component's admin permanence and component-specific invariants; confirm no Protocol factory authority can retain control.
 [x] Add Foundry fuzz tests for the offline factory prototype.
 [x] Add handler-driven Foundry invariant tests for the offline factory prototype (32 runs, depth 32; fixture-only evidence, not production readiness).
 [ ] Add production component-specific Foundry invariant tests before production readiness.
@@ -2150,7 +2154,8 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Test Ragequit invariants.
 [ ] Complete economic/legal review.
 
-[ ] Run two-network EVM end-to-end test.
+[x] Exercise the EVM adapter on two isolated local Anvil chains (real JSON-RPC submission, receipts/effects, nonce isolation, and cross-chain rejection; no public RPC/fork; fixture-only; Anvil finality is not consensus evidence).
+[ ] Run a two-network public/testnet EVM end-to-end test only after the full security audit and separate explicit deployment authorization.
 [x] Add offline NEAR signing-failure unit tests (no live signer request).
 [x] Add fake-RPC/reorg/nonce failure and recovery tests (no live network).
 [x] Test offline SQLite nonce-store backup/restore (lease states and exact signed bytes); production backup/restore rehearsal remains open.

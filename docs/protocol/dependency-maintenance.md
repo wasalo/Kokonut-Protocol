@@ -1,0 +1,65 @@
+# Protocol dependency maintenance snapshot
+
+**Checked:** 2026-10-24 (UTC)
+
+**Scope:** `Kokonut-Protocol` manifests and lockfiles, the NEAR test graph, and the Python environments used by the EVM CI job. This is a dependency-maintenance review, not the full security audit required before any public/testnet deployment.
+
+## Updates and current stable pins
+
+- `jsonschema>=4.26.0,<5` and `eth-hash[pycryptodome]>=0.8.0,<1` are the current stable PyPI releases.[1][2]
+- `eth-keys>=0.8.0,<1` and `rlp>=5.0.0,<6` are the current stable PyPI releases; Python 3.12 resolved `eth-keys 0.8.0` and `rlp 5.0.0` successfully.[3][4]
+- `near-sdk` remains at stable `5.29.1`; `5.30.0-rc.1` is a prerelease and is not adopted. `time` remains at `0.3.55`.[19][20]
+- The Rust toolchain remains at stable `1.99.1`, and `cargo-near` remains at stable `0.22.0`.[10][11]
+- `Cargo.lock` was refreshed. `smallvec` advanced to `1.16.4`; disabling near-sdk's optional default `wee_alloc` feature removed `wee_alloc` and related packages. The NEAR contract still passes its pinned check, tests, and Wasm build.
+- The resolved lockfile no longer contains `wee_alloc`, which RUSTSEC-2022-0054 reports as unmaintained; Cargo confirms it is absent from the graph.[22]
+- Foundry `1.8.6`, Solidity `0.8.38`, and Slither `0.11.6` were already the latest stable releases found in their official release feeds.[12][13][14]
+- Semgrep `1.182.0` and Aderyn `0.6.8` were also current, so those version files did not need a bump.[15][16]
+- `actions/checkout` is pinned to v7.0.1 and `actions/setup-python` to v7.1.0 by full commit SHA.[8][9]
+- Hosted runners are pinned to `ubuntu-26.04` instead of the moving `ubuntu-latest` alias.[21]
+- Semgrep's current release requires `jsonschema~=4.25.1`, while the Protocol test requirements now require `jsonschema>=4.26.0`. The EVM workflow therefore installs Semgrep in its own Python 3.12 virtual environment; both environments resolve and run independently. This avoids downgrading the Protocol's current JSON Schema dependency.
+- Semgrep CI also consumes the public `p/smart-contracts` registry pack dynamically. The ruleset revision is not pinned, so a pinned CLI alone does not make the scan fully reproducible; vendoring or pinning the ruleset remains open.
+
+## Advisory review and residuals
+
+The exact OSV querybatch review covered 279 Cargo.lock package/version pairs, 51 installed Protocol/Slither Python pairs, and 66 installed Semgrep Python pairs. It returned five advisory matches: three Rust lockfile matches, no match in the Protocol/Slither Python environment, and two Semgrep-only Python matches. The exact findings follow.[23][24][25]
+
+- `crypto-bigint 0.5.5`, pulled through `near-sdk`'s `unit-testing` feature → `near-vm-runner` → `p256 0.13.2`, matches RustSec `RUSTSEC-2026-0387`, published **October 23, 2026**. The advisory describes secret-dependent timing variability and marks `0.7.6` as fixed. The current NEAR stable dependency path constrains `p256` to the incompatible `crypto-bigint 0.5` line; do not force a major-version override. `cargo tree --target wasm32-unknown-unknown --edges normal` does not include this test-only package. Revisit when NEAR publishes a compatible stable dependency update; include it in the full audit.[5][23]
+- Semgrep v1.182.0 pins `mcp==1.29.0` and `opentelemetry-api~=1.37.0`.[15]
+- `mcp 1.29.0` matches `GHSA-84m7-p3x7-pcfv` (fixed in `1.30.0`).[17][24]
+- `opentelemetry-api 1.37.0` matches `GHSA-xcq7-p3pf-p88h`, published **October 22, 2026** and fixed in `1.45.1`.[18][25]
+- Semgrep's current exact/range requirements prevent safely upgrading those transitive packages independently. CI runs Semgrep's scan command in an isolated environment; it does not start an MCP or telemetry service. Keep this exception visible and re-evaluate when Semgrep releases compatible dependencies.
+- The NEAR unit-testing graph also retains `lru 0.16.4` (RustSec `RUSTSEC-2026-0253`, fixed in `0.18.2`) and `unsafe-libyaml 0.2.11` (RustSec `RUSTSEC-2024-0449`, unmaintained). These are test/development dependencies in the current stable NEAR stack, not evidence of a clean dependency audit.[6][7]
+
+GitHub rates the MCP and OpenTelemetry records **MODERATE**.[17][18]
+
+The RustSec records for `crypto-bigint`, `lru`, and `unsafe-libyaml` provide no numeric severity score in the OSV severity field; this snapshot does not assign one.[5][6][7]
+
+These findings remain open where upstream stable constraints prevent a safe update. A green CI run does not resolve them or satisfy the full audit gate. No public/testnet or production deployment is authorized by this snapshot.
+
+## Sources
+
+[1] https://pypi.org/project/jsonschema
+[2] https://pypi.org/project/eth-hash
+[3] https://pypi.org/project/eth-keys
+[4] https://pypi.org/project/rlp
+[5] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
+[6] https://rustsec.org/advisories/RUSTSEC-2026-0253.html
+[7] https://rustsec.org/advisories/RUSTSEC-2024-0449.html
+[8] https://github.com/actions/checkout/releases/tag/v7.0.1
+[9] https://github.com/actions/setup-python/releases/tag/v7.1.0
+[10] https://github.com/rust-lang/rust/releases/tag/1.99.1
+[11] https://github.com/near/cargo-near/releases/tag/cargo-near-v0.22.0
+[12] https://github.com/foundry-rs/foundry/releases/tag/v1.8.6
+[13] https://github.com/ethereum/solidity/releases/tag/v0.8.38
+[14] https://github.com/crytic/slither/releases/tag/0.11.6
+[15] https://github.com/semgrep/semgrep/releases/tag/v1.182.0
+[16] https://github.com/Cyfrin/aderyn/releases/tag/aderyn-v0.6.8
+[17] https://github.com/advisories/GHSA-84m7-p3x7-pcfv
+[18] https://github.com/advisories/GHSA-xcq7-p3pf-p88h
+[19] https://crates.io/crates/time/0.3.55
+[20] https://crates.io/crates/near-sdk/5.29.1
+[21] https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+[22] https://rustsec.org/advisories/RUSTSEC-2022-0054.html
+[23] https://api.osv.dev/v1/vulns/RUSTSEC-2026-0387
+[24] https://api.osv.dev/v1/vulns/GHSA-84m7-p3x7-pcfv
+[25] https://api.osv.dev/v1/vulns/GHSA-xcq7-p3pf-p88h
