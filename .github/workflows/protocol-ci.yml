@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  attestations: read
 
 jobs:
   protocol-ci:
@@ -23,12 +22,17 @@ jobs:
   protocol-near:
     name: protocol-near
     runs-on: ubuntu-26.04
-    container: rust:1.99.1
+    container: rust@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git
+      - name: Require a GitHub-hosted build runner
+        run: |
+          echo "Runner environment: ${RUNNER_ENVIRONMENT:-unset}"
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+      - name: Install pinned native build dependencies
+        run: bash scripts/install-ci-native-deps.sh
       - run: rustup target add wasm32-unknown-unknown
-      - name: Install checksum-pinned cargo-near release
+      - name: Build cargo-near from signed, pinned source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -51,16 +55,21 @@ jobs:
               raise SystemExit("Pinned cargo-near source commit signature is not valid")
           print("cargo-near source commit signature verified by GitHub")
           PY
-          archive="cargo-near-x86_64-unknown-linux-gnu.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL \
-            "https://github.com/near/cargo-near/releases/download/cargo-near-v${version}/${archive}" \
-            -o "$RUNNER_TEMP/${archive}"
-          checksum="$(tr -d '\r\n' < .cargo-near-linux-x86_64-sha256)"
-          echo "$checksum  $RUNNER_TEMP/${archive}" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/${archive}" -C "$RUNNER_TEMP"
-          tool_dir="$RUNNER_TEMP/cargo-near-x86_64-unknown-linux-gnu"
-          test -x "$tool_dir/cargo-near"
+          source_dir="$RUNNER_TEMP/cargo-near-source"
+          git clone --quiet --depth 1 --branch "cargo-near-v${version}" \
+            https://github.com/near/cargo-near.git "$source_dir"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_commit"
+          printf 'cargo-near source commit: %s\n' "$source_commit"
+          rustc +1.99.1 --version
+          target_dir="$RUNNER_TEMP/cargo-near-target"
+          tool_dir="$RUNNER_TEMP/cargo-near/bin"
+          mkdir -p "$tool_dir"
+          (cd "$source_dir" && CARGO_TARGET_DIR="$target_dir" \
+            cargo +1.99.1 build --locked --release --package cargo-near)
+          test -x "$target_dir/release/cargo-near"
+          install -m 0755 "$target_dir/release/cargo-near" "$tool_dir/cargo-near"
           test "$("$tool_dir/cargo-near" --version)" = "cargo-near $version"
+          rm -rf -- "$target_dir" "$source_dir"
           echo "$tool_dir" >> "$GITHUB_PATH"
       - name: Run NEAR checks
         env:
@@ -72,32 +81,75 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install checksum- and provenance-verified Foundry release
+      - name: Require a GitHub-hosted build runner
+        run: |
+          echo "Runner environment: ${RUNNER_ENVIRONMENT:-unset}"
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+      - name: Build Foundry from signed, pinned source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="$(tr -d '\r\n' < contracts/evm/.foundry-version)"
           source_commit="$(tr -d '\r\n' < contracts/evm/.foundry-source-commit)"
-          archive="foundry_v${version}_linux_amd64.tar.gz"
           curl --proto '=https' --tlsv1.2 -fsSL \
-            "https://github.com/foundry-rs/foundry/releases/download/v${version}/${archive}" \
-            -o "$RUNNER_TEMP/${archive}"
-          checksum="$(tr -d '\r\n' < contracts/evm/.foundry-linux-amd64-sha256)"
-          echo "$checksum  $RUNNER_TEMP/${archive}" | sha256sum --check
-          gh attestation verify "$RUNNER_TEMP/${archive}" \
-            --repo foundry-rs/foundry \
-            --signer-workflow foundry-rs/foundry/.github/workflows/release.yml \
-            --source-ref "refs/tags/v${version}" \
-            --source-digest "$source_commit" \
-            --cert-oidc-issuer https://token.actions.githubusercontent.com
-          install_dir="$RUNNER_TEMP/foundry"
-          mkdir -p "$install_dir"
-          tar -xzf "$RUNNER_TEMP/${archive}" -C "$install_dir"
-          if ! "$install_dir/forge" --version | grep -Fq "$version"; then
-            printf 'Installed Foundry version did not match the pin.\n' >&2
-            exit 1
-          fi
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/foundry-rs/foundry/git/commits/${source_commit}" \
+            -o "$RUNNER_TEMP/foundry-source-commit.json"
+          python3 - "$RUNNER_TEMP/foundry-source-commit.json" "$source_commit" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          commit = json.loads(Path(sys.argv[1]).read_text())
+          verification = commit.get("verification", {})
+          if commit.get("sha") != sys.argv[2] or verification.get("verified") is not True or verification.get("reason") != "valid":
+              raise SystemExit("Pinned Foundry source commit signature is not valid")
+          print("Foundry source commit signature verified by GitHub")
+          PY
+          source_dir="$RUNNER_TEMP/foundry-source"
+          git clone --quiet --depth 1 --branch "v${version}" \
+            https://github.com/foundry-rs/foundry.git "$source_dir"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_commit"
+          printf 'Foundry source commit: %s\n' "$source_commit"
+          target_dir="$RUNNER_TEMP/foundry-target"
+          cargo_home="$RUNNER_TEMP/foundry-cargo-home"
+          install_dir="$RUNNER_TEMP/foundry/bin"
+          mkdir -p "$target_dir" "$cargo_home" "$install_dir"
+          docker run --rm \
+            --mount "type=bind,source=$source_dir,target=/src,readonly" \
+            --mount "type=bind,source=$target_dir,target=/target" \
+            --mount "type=bind,source=$cargo_home,target=/cargo" \
+            --mount "type=bind,source=$install_dir,target=/output" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/scripts/install-ci-native-deps.sh,target=/install-ci-native-deps.sh,readonly" \
+            -w /src \
+            -e CARGO_HOME=/cargo \
+            -e CARGO_TARGET_DIR=/target \
+            -e CARGO_BUILD_JOBS=2 \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_PROFILE_DEV_DEBUG=0 \
+            -e TAG_NAME="v${version}" \
+            rust@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc \
+            bash -c 'set -euo pipefail
+              bash /install-ci-native-deps.sh
+              git config --global --add safe.directory /src
+              rustc +1.99.1 --version
+              cargo +1.99.1 build --locked --bin forge --bin anvil
+              test -x /target/debug/forge
+              test -x /target/debug/anvil
+              install -m 0755 /target/debug/forge /output/forge
+              install -m 0755 /target/debug/anvil /output/anvil
+              python3 -c "from pathlib import Path; import shutil; [shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink() for root in (Path(\"/target\"), Path(\"/cargo\")) for p in root.iterdir()]"'
+          forge_version="$("$install_dir/forge" --version)"
+          anvil_version="$("$install_dir/anvil" --version)"
+          printf '%s\n%s\n' "$forge_version" "$anvil_version"
+          grep -Fq "Version: $version" <<<"$forge_version"
+          grep -Fq "Commit SHA: $source_commit" <<<"$forge_version"
+          grep -Fq "Version: $version" <<<"$anvil_version"
+          grep -Fq "Commit SHA: $source_commit" <<<"$anvil_version"
+          rmdir "$target_dir" "$cargo_home"
+          rm -rf -- "$source_dir"
           echo "$install_dir" >> "$GITHUB_PATH"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
