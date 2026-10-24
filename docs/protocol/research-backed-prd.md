@@ -2089,48 +2089,50 @@ The implementation can begin without settling all tokenomics, but these decision
 
 The following is the implementation order Codex should follow.
 
+For this repository checklist, `[x]` means implementation or tests exist at the explicitly stated prototype/offline scope; it does not imply testnet integration, production readiness, or independent review. KI-owned work remains deferred until the KI refactor is finalized and the product owner sets the KI PR target.
+
 ```text
-[ ] Read AGENTS.md and docs/refactor/* in Kokonut-Intelligence.
-[ ] Record current Kokonut-Intelligence HEAD.
-[ ] Record latest PostgreSQL migration number.
-[ ] Run make ci before changing anything.
+[ ] Re-read Kokonut Intelligence AGENTS.md and docs/refactor/* after the KI refactor is finalized.
+[ ] Record the post-refactor Kokonut-Intelligence HEAD.
+[ ] Record the post-refactor latest PostgreSQL migration number.
+[ ] Run Kokonut Intelligence CI before starting any KI integration work.
 
-[ ] Create Kokonut-Protocol repository skeleton.
-[ ] Add AGENTS.md and architecture ADRs.
-[ ] Add execution-request and deployment-profile JSON Schemas.
-[ ] Add chain capability interface.
-[ ] Establish protocol-ci.
+[x] Create Kokonut-Protocol repository skeleton.
+[x] Add AGENTS.md and architecture ADRs.
+[x] Add execution-request and deployment-profile JSON Schemas.
+[x] Add chain capability interface.
+[x] Establish protocol-ci.
 
-[ ] Add Protocol registry migrations to Kokonut-Intelligence.
-[ ] Add Protocol domain/repository models.
-[ ] Add read-only CLI/API.
-[ ] Add SQL/invariant/agent-safety tests.
-[ ] Run make ci.
+[ ] Add Protocol registry migrations to Kokonut-Intelligence (deferred pending the KI refactor and explicit KI PR target).
+[ ] Add Protocol domain/repository models in KI (deferred pending the KI refactor and explicit KI PR target).
+[ ] Add read-only CLI/API in KI (deferred pending the KI refactor and explicit KI PR target).
+[ ] Add SQL/invariant/agent-safety tests for the KI integration (deferred with KI work).
+[ ] Run KI integration CI after the refactor and PR target are confirmed.
 
-[ ] Implement NEAR Hub registry.
-[ ] Implement Hub policy controls.
-[ ] Implement execution replay protection.
-[ ] Add pause/emergency controls.
-[ ] Add NEAR unit + sandbox tests.
+[x] Implement NEAR Hub registry (offline contract prototype).
+[x] Implement Hub policy controls (versioned, scoped execution policy).
+[x] Implement execution replay protection (request and idempotency-key uniqueness).
+[x] Add pause/emergency controls (administrator-gated pause/unpause).
+[x] Add NEAR unit tests (63 passing).
+[ ] Add NEAR sandbox tests (no local/deployed sandbox integration is present).
 
-[ ] Implement Chain Signatures client.
-[ ] Implement derivation-path policy.
-[ ] Implement EVM adapter.
-[ ] Implement durable nonce manager.
-[ ] Implement simulation.
-[ ] Implement broadcast/finality.
-[ ] Implement effect verification.
+[x] Implement the testnet-gated NEAR Hub Chain Signatures request/callback path; no live signer client or E2E request is configured.
+[x] Enforce project/chain/purpose-scoped derivation-path policy.
+[x] Implement the testnet-only EVM adapter prototype (Base Sepolia and Gnosis Chiado profiles).
+[x] Implement the local SQLite durable nonce manager (not a production shared-store design).
+[x] Implement transaction simulation (exercised with fake JSON-RPC).
+[x] Implement broadcast/finality/effect-verification paths (mocked RPC tests only; no live transaction sent).
 
-[ ] Wire execution into KI durable event bus.
-[ ] Persist every execution state transition.
-[ ] Implement dead-letter/manual recovery.
-[ ] Test worker crash between signing and broadcast.
-[ ] Test duplicate execution delivery.
+[ ] Wire execution into KI durable event bus (deferred pending KI refactor and explicit KI PR target).
+[ ] Persist every execution state transition in the canonical KI workflow (deferred; no parallel Protocol ledger).
+[ ] Implement KI-owned dead-letter/manual recovery integration (deferred pending KI refactor and explicit KI PR target).
+[ ] Test KI worker crash between signing and broadcast (deferred with the KI event integration).
+[ ] Test duplicate delivery through the KI durable event bus (deferred with the KI event integration).
 
-[ ] Integrate existing Gnosis Baal read client.
-[ ] Integrate existing Celo EAS records.
-[ ] Add canonical claim/attestation federation.
-[ ] Verify no attestation double counting.
+[ ] Integrate the existing Gnosis Baal read client through KI (deferred pending the KI refactor and explicit KI PR target).
+[ ] Integrate existing Celo EAS records through KI (deferred pending the KI refactor and explicit KI PR target).
+[ ] Add canonical claim/attestation federation through KI (deferred with KI work).
+[ ] Verify no attestation double counting in the KI integration (deferred with KI work).
 
 [x] Build and test offline EVM project factory prototype (not production deployment).
 [ ] Ensure permanent admin transfers to project Safe/DAO (factory rejects declared split authorities and verifies a bounded initial manifest; manifest completeness, Safe/DAO identity/governance, and future admin/upgrade behavior remain unverified).
@@ -2140,6 +2142,7 @@ The following is the implementation order Codex should follow.
 [x] Run Slither/Semgrep/Aderyn through CI.
 
 [x] Pin and assess Majeur at `7d7a36b5a25d31f7aa4d499b3a57ee98f4367fac` (offline source review only; integration and activation remain unchecked).
+[x] Add offline, integer-base-unit Revenue Container waterfall simulator (proposal/model only; not accounting or settlement).
 [ ] Create isolated Revenue Container pilot.
 [ ] Implement revenue-period accounting.
 [ ] Implement versioned waterfall policy.
@@ -2148,8 +2151,8 @@ The following is the implementation order Codex should follow.
 [ ] Complete economic/legal review.
 
 [ ] Run two-network EVM end-to-end test.
-[ ] Run NEAR signing failure tests.
-[ ] Run RPC/reorg/nonce failure tests.
+[x] Add offline NEAR signing-failure unit tests (no live signer request).
+[x] Add fake-RPC/reorg/nonce failure and recovery tests (no live network).
 [ ] Run backup/restore tests.
 
 [ ] Replace AMD64-only PostGIS candidate reference.
@@ -2160,7 +2163,7 @@ The following is the implementation order Codex should follow.
 
 [ ] Independent manual smart-contract audit.
 [ ] Resolve Critical/High findings.
-[ ] Complete Protocol incident runbook.
+[ ] Complete operational incident runbook (the current runbook is development/testnet-only; production backend and operator procedures are absent).
 [ ] Complete economic audit.
 [ ] Complete jurisdiction-specific legal review.
 
@@ -2170,8 +2173,9 @@ The following is the implementation order Codex should follow.
 [ ] Governance approval for financial activation.
 ```
 
-The current repository provides a strong implementation starting point rather than a legacy obstacle: the Kernel candidate already demonstrates the two-service architectural direction, durable scheduler/event infrastructure already exists, Gnosis/Baal and Celo/EAS integrations already exist, and ARM64 images have already been built even though native Raspberry Pi certification remains open. fileciteturn10file0 fileciteturn16file0 fileciteturn17file0 fileciteturn22file0
+Evidence for the checked prototype items: [NEAR Hub execution controller](execution-controller.md), [testnet EVM adapter](evm-adapter.md), [offline factory](evm-factory.md), [recovery runbook](runbook.md), and [offline Revenue Container simulator](revenue-containers.md), together with their source and tests. KI integrations, production components, live operations, audits, and governance/legal approvals remain separate gates.
 
+The current repository provides a strong implementation starting point rather than a legacy obstacle: the Kernel candidate already demonstrates the two-service architectural direction, durable scheduler/event infrastructure already exists, Gnosis/Baal and Celo/EAS integrations already exist, and ARM64 images have already been built even though native Raspberry Pi certification remains open. citeturn10file0 citeturn16file0 citeturn17file0 citeturn22file0
 The architectural end state is therefore not a larger stack.
 
 It is a **smaller Kokonut core with a larger reach**:
