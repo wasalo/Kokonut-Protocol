@@ -147,6 +147,45 @@ contract KokonutProjectFactoryTests {
         factory.deployProject(PROJECT_ID, address(0xCAFE), initCode);
     }
 
+    function testConfigurationAuthorityCannotRemainProjectAdmin() public {
+        address configurationAuthority = address(new MockProjectAdmin());
+        address deploymentAuthority = address(new MockProjectAdmin());
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        KokonutProjectFactory factory = new KokonutProjectFactory(configurationAuthority, deploymentAuthority);
+        vm.prank(configurationAuthority);
+        factory.setCreationCodeHashAllowed(keccak256(initCode), true);
+
+        vm.prank(deploymentAuthority);
+        vm.expectRevert(KokonutProjectFactory.InvalidProjectAdmin.selector);
+        factory.deployProject(PROJECT_ID, configurationAuthority, initCode);
+    }
+
+    function testDeploymentAuthorityCannotRemainProjectAdmin() public {
+        address configurationAuthority = address(new MockProjectAdmin());
+        address deploymentAuthority = address(new MockProjectAdmin());
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        KokonutProjectFactory factory = new KokonutProjectFactory(configurationAuthority, deploymentAuthority);
+        vm.prank(configurationAuthority);
+        factory.setCreationCodeHashAllowed(keccak256(initCode), true);
+
+        vm.prank(deploymentAuthority);
+        vm.expectRevert(KokonutProjectFactory.InvalidProjectAdmin.selector);
+        factory.deployProject(PROJECT_ID, deploymentAuthority, initCode);
+    }
+
+    function testFactoryCannotRemainProjectAdmin() public {
+        address configurationAuthority = address(new MockProjectAdmin());
+        address deploymentAuthority = address(new MockProjectAdmin());
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        KokonutProjectFactory factory = new KokonutProjectFactory(configurationAuthority, deploymentAuthority);
+        vm.prank(configurationAuthority);
+        factory.setCreationCodeHashAllowed(keccak256(initCode), true);
+
+        vm.prank(deploymentAuthority);
+        vm.expectRevert(KokonutProjectFactory.InvalidProjectAdmin.selector);
+        factory.deployProject(PROJECT_ID, address(factory), initCode);
+    }
+
     function testFuzzDeploymentMatchesPredictedAddress(bytes32 projectId) public {
         vm.assume(projectId != bytes32(0));
         bytes memory initCode = type(MockProjectComponent).creationCode;

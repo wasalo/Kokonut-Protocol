@@ -2137,7 +2137,7 @@ The following is the implementation order Codex should follow.
 [ ] Verify no attestation double counting.
 
 [ ] Create project factory contracts.
-[ ] Ensure permanent admin transfers to project Safe/DAO.
+[ ] Ensure permanent admin transfers to project Safe/DAO (factory authorities are now excluded as admin; Safe/DAO identity and component admin permanence remain unverified).
 [ ] Add Foundry fuzz/invariant tests.
 [x] Run Slither/Semgrep/Aderyn through CI.
 

@@ -54,7 +54,10 @@ contract KokonutProjectFactory {
     {
         if (msg.sender != deploymentAuthority) revert Unauthorized();
         if (projectId == bytes32(0)) revert InvalidProjectId();
-        if (projectAdmin == address(0) || projectAdmin.code.length == 0) {
+        if (
+            projectAdmin == address(0) || projectAdmin.code.length == 0 || projectAdmin == address(this)
+                || projectAdmin == configurationAuthority || projectAdmin == deploymentAuthority
+        ) {
             revert InvalidProjectAdmin();
         }
         if (projectById[projectId] != address(0)) revert ProjectAlreadyDeployed();

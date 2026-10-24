@@ -7,14 +7,14 @@
 - A configuration authority controls an allowlist of exact component *creation-code hashes*. The hash covers the full creation code supplied at deployment; it is not a runtime-code hash or an audit certificate.
 - A separate deployment authority may deploy only allowlisted creation code. The two authority addresses must differ.
 - A project ID is unique in the factory and supplies a domain-separated CREATE2 salt, so the destination address can be predicted for a given factory and creation-code hash.
-- The factory creates the component and calls `initialize(projectId, projectAdmin)` in the same transaction. It then reads both values back and reverts the complete transaction if initialization did not take effect as requested.
-- The project admin must be nonzero and have deployed code at deployment time. This checks only that the address contains code; it does not prove the contract is a Safe, a DAO, or configured with a suitable quorum.
+- The project admin must be nonzero, have deployed code at deployment time, and differ from the factory, configuration authority, and deployment authority. This prevents Protocol-side factory authorities from being the component's recorded admin.
+- The factory initializes the component with the project ID and supplied project admin, reads both values back in the same transaction, and reverts on mismatch. That verifies initial wiring only; it does not prove the admin is a Safe/DAO or establish the component's future admin/upgrade behavior.
 - A configuration authority may revoke an allowed creation-code hash. Revocation affects future deployments, not already deployed components.
 - No assets, treasury balances, economic rights, upgrades, custody, or autonomous approval behavior are implemented.
 
 ## Explicit limits
 
-This is development/test code, not a production factory, security audit, or deployment approval. Creation-code allowlisting is only as trustworthy as the authority that approves the hash. The prototype does not validate the component's source, governance semantics, vulnerabilities, project-specific authorization payload, or legal/economic rights. A production design still needs reviewed binding between the human-approved NEAR request and all factory calldata, an appropriately governed configuration authority, audited component implementations, destination-chain controls, and independent contract review.
+This is development/test code, not a production factory, security audit, or deployment approval. Creation-code allowlisting is only as trustworthy as the authority that approves the hash. The prototype does not validate the component's source, governance semantics, vulnerabilities, project-specific authorization payload, or legal/economic rights. It also cannot inspect a project Safe/DAO's owners, threshold, modules, or upgrade/admin semantics; separately review those and confirm that the selected component makes project control durable before any deployment. A production design still needs reviewed binding between the human-approved NEAR request and all factory calldata, an appropriately governed configuration authority, audited component implementations, destination-chain controls, and independent contract review.
 
 The Foundry, Slither, and Aderyn tool versions are pinned under `contracts/evm/`; the Aderyn Linux archive is checksum-verified. Run from the repository root:
 
