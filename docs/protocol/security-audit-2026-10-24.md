@@ -125,7 +125,7 @@ The rules carry Semgrep Rules License v1.0 metadata. That license permits intern
 - Python: `make lint test PYTHON=/home/ubuntu/.cache/kokonut-protocol-py312/bin/python` — **96 tests passed**; compile and JSON parsing checks passed.
 - NEAR: with the checksum-pinned `cargo-near 0.22.0` release, `cargo fmt --check`, `cargo near check --locked`, `cargo test --locked`, and `cargo near build non-reproducible-wasm --locked --out-dir target/deploy` passed; **68 tests passed**. The generated Wasm is development/CI output only and was not deployed.
 - Foundry `1.8.6`: the direct release archive SHA-256 and constrained GitHub attestation passed; `forge fmt --check`, build, and tests passed (**28 tests**, including 32-run/1,024-call invariant campaign). The dual-Anvil local integration test also passed (**1 test**).
-- Full local `make ci` — **passed** with pinned Foundry/cargo-near, Slither `0.11.6` (2 contracts/102 detectors, zero findings), Semgrep `1.182.1` (49 rules, zero findings), Aderyn `0.6.8` (zero High findings), and Gitleaks `8.30.0` (working tree/history both clean; synthetic self-test passed). Remote GitHub Actions has not yet run for this worktree; local success is not a hosted-runner result.
+- Full local `make ci` — **passed** with pinned Foundry/cargo-near, Slither `0.11.6` (2 contracts/102 detectors, zero findings), Semgrep `1.182.1` (49 rules, zero findings), Aderyn `0.6.8` (zero High findings), and Gitleaks `8.30.0` (working tree/history both clean; synthetic self-test passed). Hosted GitHub Actions run `40116833899` for commit `fcd3ac4a867fef7d00483a670d4ec62fa99912f0` passed `protocol-ci`, `protocol-evm`, `protocol-near`, and `protocol-secrets`; all four checks reported zero annotations.
 - The report is bounded to repository source, fixtures, local package metadata, and the cited advisories. No live NEAR signer, EVM RPC, public chain, transaction, or deployment was used.
 
 ## Unchecked PRD item reconciliation (October 24, 2026)
@@ -149,7 +149,7 @@ The 47 unchecked PRD items were rechecked; none is invalidated by this source au
 2. Supply and audit the actual EVM project component, its full authority/upgrade paths, and the exact intended Safe/DAO target.
 3. Confirm NEAR administrator multisig/governance, rotation and recovery procedures, and storage funding/retention policy.
 4. Decide and implement production stale-signature/expiry controls at the destination; the NEAR state transition cannot revoke an already-issued signature.
-5. Complete cargo-near binary-build provenance with an upstream attestation or a pinned, reviewed source-build process; run and review the hosted GitHub Actions results for the updated pinned-toolchain workflow.
+5. Complete cargo-near binary-build provenance with an upstream attestation or a pinned, reviewed source-build process; decide whether to accept Foundry's attested self-hosted release runner or require a trusted alternative.
 6. Obtain separate explicit authorization before any testnet deployment, live signature request, or destination-chain activity.
 
 ## Sources
