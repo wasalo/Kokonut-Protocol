@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: lint test lint-near test-near build-near ci
+.PHONY: lint test lint-near test-near build-near lint-evm test-evm ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -18,4 +18,10 @@ test-near:
 build-near:
 	cd contracts/near && cargo near build non-reproducible-wasm --locked --out-dir target/deploy
 
-ci: lint test lint-near test-near build-near
+lint-evm:
+	cd contracts/evm && forge fmt --check && forge build --sizes
+
+test-evm:
+	cd contracts/evm && forge test
+
+ci: lint test lint-near test-near build-near lint-evm test-evm

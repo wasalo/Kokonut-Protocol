@@ -1,3 +1,6 @@
 __pycache__/
 *.py[cod]
 **/target/
+contracts/evm/out/
+contracts/evm/cache/
+contracts/evm/broadcast/
