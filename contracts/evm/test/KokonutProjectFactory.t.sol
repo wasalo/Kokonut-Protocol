@@ -9,18 +9,68 @@ interface Vm {
     function assume(bool condition) external;
 }
 
+library MockAuthorityManifest {
+    function create(address projectAdmin, address upgradeAuthority)
+        internal
+        pure
+        returns (bytes32[] memory roles, address[] memory controllers)
+    {
+        bytes32 projectAdminRole = keccak256("KOKONUT_PROJECT_ADMIN");
+        bytes32 upgradeRole = keccak256("KOKONUT_UPGRADE_AUTHORITY");
+        roles = new bytes32[](2);
+        controllers = new address[](2);
+        if (projectAdminRole < upgradeRole) {
+            roles[0] = projectAdminRole;
+            controllers[0] = projectAdmin;
+            roles[1] = upgradeRole;
+            controllers[1] = upgradeAuthority;
+        } else {
+            roles[0] = upgradeRole;
+            controllers[0] = upgradeAuthority;
+            roles[1] = projectAdminRole;
+            controllers[1] = projectAdmin;
+        }
+    }
+}
+
 contract MockProjectComponent {
     bytes32 public projectId;
     address public projectAdmin;
     bool private initialized;
 
     error AlreadyInitialized();
+    error Unauthorized();
 
     function initialize(bytes32 projectId_, address projectAdmin_) external {
         if (initialized) revert AlreadyInitialized();
         initialized = true;
         projectId = projectId_;
         projectAdmin = projectAdmin_;
+    }
+
+    function setProjectAdmin(address nextProjectAdmin) external {
+        if (msg.sender != projectAdmin) revert Unauthorized();
+        projectAdmin = nextProjectAdmin;
+    }
+
+    function authoritySurfaces() external view returns (bytes32[] memory roles, address[] memory controllers) {
+        return MockAuthorityManifest.create(projectAdmin, address(0));
+    }
+}
+
+contract MockSplitAuthorityComponent {
+    bytes32 public projectId;
+    address public projectAdmin;
+    address public upgradeAuthority;
+
+    function initialize(bytes32 projectId_, address projectAdmin_) external {
+        projectId = projectId_;
+        projectAdmin = projectAdmin_;
+        upgradeAuthority = address(0xB0B);
+    }
+
+    function authoritySurfaces() external view returns (bytes32[] memory roles, address[] memory controllers) {
+        return MockAuthorityManifest.create(projectAdmin, upgradeAuthority);
     }
 }
 
@@ -56,6 +106,34 @@ contract KokonutProjectFactoryTests {
         require(component.projectId() == PROJECT_ID, "project ID not initialized");
         require(component.projectAdmin() == PROJECT_ADMIN, "admin not initialized");
         require(factory.projectById(PROJECT_ID) == deployed, "project not registered");
+    }
+
+    function testDeploymentAuthorityCannotReinitializeComponent() public {
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        KokonutProjectFactory factory = _newFactory(keccak256(initCode));
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        MockProjectComponent component =
+            MockProjectComponent(factory.deployProject(PROJECT_ID, PROJECT_ADMIN, initCode));
+
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        vm.expectRevert(MockProjectComponent.AlreadyInitialized.selector);
+        component.initialize(PROJECT_ID, DEPLOYMENT_AUTHORITY);
+
+        require(component.projectAdmin() == PROJECT_ADMIN, "reinitialization changed project admin");
+    }
+
+    function testDeploymentAuthorityCannotChangeProjectAdmin() public {
+        bytes memory initCode = type(MockProjectComponent).creationCode;
+        KokonutProjectFactory factory = _newFactory(keccak256(initCode));
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        MockProjectComponent component =
+            MockProjectComponent(factory.deployProject(PROJECT_ID, PROJECT_ADMIN, initCode));
+
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        vm.expectRevert(MockProjectComponent.Unauthorized.selector);
+        component.setProjectAdmin(DEPLOYMENT_AUTHORITY);
+
+        require(component.projectAdmin() == PROJECT_ADMIN, "unauthorized admin change succeeded");
     }
 
     function testOnlyConfiguredDeploymentAuthorityCanDeploy() public {
@@ -137,6 +215,15 @@ contract KokonutProjectFactoryTests {
         vm.expectRevert(KokonutProjectFactory.ProjectInitializationMismatch.selector);
         factory.deployProject(PROJECT_ID, PROJECT_ADMIN, initCode);
         require(factory.projectById(PROJECT_ID) == address(0), "failed deployment was retained");
+    }
+
+    function testRejectsComponentAuthorityControlledByDeploymentAuthority() public {
+        bytes memory initCode = type(MockSplitAuthorityComponent).creationCode;
+        KokonutProjectFactory factory = _newFactory(keccak256(initCode));
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        vm.expectRevert(KokonutProjectFactory.ProjectAuthorityManifestMismatch.selector);
+        factory.deployProject(PROJECT_ID, PROJECT_ADMIN, initCode);
+        require(factory.projectById(PROJECT_ID) == address(0), "rejected component was registered");
     }
 
     function testProjectAdminMustBeAContract() public {

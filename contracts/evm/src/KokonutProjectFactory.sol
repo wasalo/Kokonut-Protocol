@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.38;
 
+/// @notice Initialized project components must report every privileged authority surface.
+/// @dev A zero controller means no controller; every mutable surface must name projectAdmin.
+///      Source review must verify that the component's manifest is complete and governance is suitable.
 interface IInitializableProjectComponent {
     function initialize(bytes32 projectId_, address projectAdmin_) external;
     function projectId() external view returns (bytes32);
     function projectAdmin() external view returns (address);
+    function authoritySurfaces() external view returns (bytes32[] memory roles, address[] memory controllers);
 }
 
 /// @notice Testnet-development factory for pre-approved project component creation code.
@@ -21,6 +25,10 @@ contract KokonutProjectFactory {
     error ProjectAlreadyDeployed();
     error Create2DeploymentFailed();
     error ProjectInitializationMismatch();
+    error ProjectAuthorityManifestMismatch();
+
+    bytes32 public constant PROJECT_ADMIN_ROLE = keccak256("KOKONUT_PROJECT_ADMIN");
+    uint256 private constant MAX_AUTHORITY_SURFACES = 32;
 
     address public immutable configurationAuthority;
     address public immutable deploymentAuthority;
@@ -90,9 +98,67 @@ contract KokonutProjectFactory {
             ) {
                 revert ProjectInitializationMismatch();
             }
+            _verifyAuthorityManifest(component, projectAdmin);
         } catch {
             revert ProjectInitializationMismatch();
         }
+    }
+
+    function _verifyAuthorityManifest(address component, address projectAdmin) private view {
+        (bytes32[] memory roles, address[] memory controllers) = _readAuthorityManifest(component);
+        uint256 surfaceCount = roles.length;
+        if (surfaceCount == 0 || surfaceCount > MAX_AUTHORITY_SURFACES || controllers.length != surfaceCount) {
+            revert ProjectAuthorityManifestMismatch();
+        }
+        _validateAuthorityManifest(roles, controllers, projectAdmin);
+    }
+
+    function _readAuthorityManifest(address component)
+        private
+        view
+        returns (bytes32[] memory roles, address[] memory controllers)
+    {
+        try IInitializableProjectComponent(component).authoritySurfaces() returns (
+            bytes32[] memory roles_, address[] memory controllers_
+        ) {
+            return (roles_, controllers_);
+        } catch {
+            revert ProjectAuthorityManifestMismatch();
+        }
+    }
+
+    function _validateAuthorityManifest(bytes32[] memory roles, address[] memory controllers, address projectAdmin)
+        private
+        pure
+    {
+        bool projectAdminSurfaceFound = false;
+        bool manifestValid = true;
+        uint256 surfaceCount = roles.length;
+        for (uint256 i = 0; i < surfaceCount;) {
+            if (!_isValidAuthoritySurface(roles[i], controllers[i], projectAdmin)) {
+                manifestValid = false;
+            }
+            if (i > 0) {
+                if (roles[i] <= roles[i - 1]) manifestValid = false;
+            }
+            if (roles[i] == PROJECT_ADMIN_ROLE) projectAdminSurfaceFound = true;
+            unchecked {
+                ++i;
+            }
+        }
+        if (!manifestValid || !projectAdminSurfaceFound) revert ProjectAuthorityManifestMismatch();
+    }
+
+    function _isValidAuthoritySurface(bytes32 role, address controller, address projectAdmin)
+        private
+        pure
+        returns (bool)
+    {
+        if (role == bytes32(0)) return false;
+        if (controller != address(0)) {
+            if (controller != projectAdmin) return false;
+        }
+        return role != PROJECT_ADMIN_ROLE || controller == projectAdmin;
     }
 
     function predictProjectAddress(bytes32 projectId, bytes32 creationCodeHash) external view returns (address) {

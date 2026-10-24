@@ -2133,7 +2133,7 @@ The following is the implementation order Codex should follow.
 [ ] Verify no attestation double counting.
 
 [x] Build and test offline EVM project factory prototype (not production deployment).
-[ ] Ensure permanent admin transfers to project Safe/DAO (factory authorities are now excluded as admin; Safe/DAO identity and component admin permanence remain unverified).
+[ ] Ensure permanent admin transfers to project Safe/DAO (factory rejects declared split authorities and verifies a bounded initial manifest; manifest completeness, Safe/DAO identity/governance, and future admin/upgrade behavior remain unverified).
 [x] Add Foundry fuzz tests for the offline factory prototype.
 [ ] Add Foundry invariant tests before production readiness.
 [x] Run Slither/Semgrep/Aderyn through CI.
