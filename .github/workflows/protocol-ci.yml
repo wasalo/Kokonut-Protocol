@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  attestations: read
 
 jobs:
   protocol-ci:
@@ -27,24 +28,78 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git
       - run: rustup target add wasm32-unknown-unknown
-      - run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh -o /tmp/cargo-near-installer.sh
-      - run: CARGO_NEAR_NO_MODIFY_PATH=1 CARGO_NEAR_DISABLE_UPDATE=1 sh /tmp/cargo-near-installer.sh --quiet
-      - run: make lint-near test-near build-near
+      - name: Install checksum-pinned cargo-near release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < .cargo-near-version)"
+          source_commit="$(tr -d '\r\n' < .cargo-near-source-commit)"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/near/cargo-near/git/commits/${source_commit}" \
+            -o "$RUNNER_TEMP/cargo-near-source-commit.json"
+          python3 - "$RUNNER_TEMP/cargo-near-source-commit.json" "$source_commit" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          commit = json.loads(Path(sys.argv[1]).read_text())
+          verification = commit.get("verification", {})
+          if commit.get("sha") != sys.argv[2] or verification.get("verified") is not True or verification.get("reason") != "valid":
+              raise SystemExit("Pinned cargo-near source commit signature is not valid")
+          print("cargo-near source commit signature verified by GitHub")
+          PY
+          archive="cargo-near-x86_64-unknown-linux-gnu.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "https://github.com/near/cargo-near/releases/download/cargo-near-v${version}/${archive}" \
+            -o "$RUNNER_TEMP/${archive}"
+          checksum="$(tr -d '\r\n' < .cargo-near-linux-x86_64-sha256)"
+          echo "$checksum  $RUNNER_TEMP/${archive}" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/${archive}" -C "$RUNNER_TEMP"
+          tool_dir="$RUNNER_TEMP/cargo-near-x86_64-unknown-linux-gnu"
+          test -x "$tool_dir/cargo-near"
+          test "$("$tool_dir/cargo-near" --version)" = "cargo-near $version"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+      - name: Run NEAR checks
+        env:
+          CARGO_NEAR_DISABLE_UPDATE: "1"
+        run: make lint-near test-near build-near
 
   protocol-evm:
     name: protocol-evm
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: curl --proto '=https' --tlsv1.2 -fsSL https://foundry.paradigm.xyz -o "$RUNNER_TEMP/foundryup-init.sh"
-      - env:
-          FOUNDRY_DIR: ${{ runner.temp }}/foundry
-        run: sh "$RUNNER_TEMP/foundryup-init.sh" --yes
-      - env:
-          FOUNDRY_DIR: ${{ runner.temp }}/foundry
+      - name: Install checksum- and provenance-verified Foundry release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          "$FOUNDRY_DIR/bin/foundryup" --install "$(tr -d '\\r\\n' < contracts/evm/.foundry-version)"
-          echo "$FOUNDRY_DIR/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          version="$(tr -d '\r\n' < contracts/evm/.foundry-version)"
+          source_commit="$(tr -d '\r\n' < contracts/evm/.foundry-source-commit)"
+          archive="foundry_v${version}_linux_amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "https://github.com/foundry-rs/foundry/releases/download/v${version}/${archive}" \
+            -o "$RUNNER_TEMP/${archive}"
+          checksum="$(tr -d '\r\n' < contracts/evm/.foundry-linux-amd64-sha256)"
+          echo "$checksum  $RUNNER_TEMP/${archive}" | sha256sum --check
+          gh attestation verify "$RUNNER_TEMP/${archive}" \
+            --repo foundry-rs/foundry \
+            --signer-workflow foundry-rs/foundry/.github/workflows/release.yml \
+            --source-ref "refs/tags/v${version}" \
+            --source-digest "$source_commit" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --deny-self-hosted-runners
+          install_dir="$RUNNER_TEMP/foundry"
+          mkdir -p "$install_dir"
+          tar -xzf "$RUNNER_TEMP/${archive}" -C "$install_dir"
+          if ! "$install_dir/forge" --version | grep -Fq "$version"; then
+            printf 'Installed Foundry version did not match the pin.\n' >&2
+            exit 1
+          fi
+          echo "$install_dir" >> "$GITHUB_PATH"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
@@ -56,10 +111,10 @@ jobs:
           "$semgrep_env/bin/python" -m pip install "semgrep==$(< contracts/evm/.semgrep-version)"
       - name: Install checksum-verified Aderyn
         run: |
-          version="$(tr -d '\\r\\n' < contracts/evm/.aderyn-version)"
+          version="$(tr -d '\r\n' < contracts/evm/.aderyn-version)"
           archive="aderyn-x86_64-unknown-linux-gnu.tar.xz"
           curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/Cyfrin/aderyn/releases/download/aderyn-v${version}/${archive}" -o "$RUNNER_TEMP/${archive}"
-          checksum="$(tr -d '\\r\\n' < contracts/evm/.aderyn-linux-x86_64-sha256)"
+          checksum="$(tr -d '\r\n' < contracts/evm/.aderyn-linux-x86_64-sha256)"
           echo "$checksum  $RUNNER_TEMP/${archive}" | sha256sum --check
           tar -xJf "$RUNNER_TEMP/${archive}" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/aderyn-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
@@ -67,3 +122,15 @@ jobs:
         env:
           SEMGREP: ${{ runner.temp }}/semgrep-venv/bin/semgrep
         run: make lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-aderyn
+
+  protocol-secrets:
+    name: protocol-secrets
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Scan working tree and complete Git history
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: make audit-secrets

@@ -64,24 +64,45 @@ The dependency graph check confirmed `crypto-bigint 0.5.5`, `lru 0.16.4`, and `u
 - **Required decision:** Define storage payment/reimbursement, maximum request volume/size, and archival/retention behavior before live operation. Do not silently delete idempotency history, which could permit replay.
 - **Confidence:** Medium; the storage growth path is visible, but operational impact depends on traffic, funding, and NEAR storage economics.
 
-### 6. Medium — CI lacks secret scanning and executes downloaded installers without checksum verification — **open CI-hardening finding**
+### 6. Medium — CI secret scanning added; installers pinned with one provenance gap remaining — **partially remediated**
 
-- **Location:** `Makefile:4–46` has no secret-scanning target. `.github/workflows/protocol-ci.yml:25–31` downloads and executes the `cargo-near` installer; `:39–47` downloads and executes the Foundry bootstrap/`foundryup` installer. The Aderyn archive is checksum-verified at `:57–64`, and GitHub Actions are pinned by commit SHA.
-- **Scenario and impact:** A committed credential could pass current tests/analyzers unnoticed. A compromised or replaced installer can execute arbitrary code in a CI runner. Workflow permissions are read-only, and no deployment secret is configured in this workflow, which limits but does not remove the build-integrity risk.
-- **Recommendation:** Add a pinned secret scanner with redacted output and explicit tracked-file/history coverage; verify installer artifacts against trusted published checksums/signatures or replace the bootstrap paths with verifiable pinned assets; retain read-only permissions and avoid publishing unverified build artifacts.
-- **Confidence:** High that these checks are absent from the inspected workflow; exploitability is conditional on a secret commit or upstream/tool-distribution compromise.
+- **Location:** `.github/workflows/protocol-ci.yml` has a `protocol-secrets` job that checks out full history and runs `make audit-secrets`. The Makefile adds that target to `make ci`. Gitleaks is pinned in `.gitleaks-version` and `.gitleaks-linux-x86_64-sha256`; the wrapper and supplemental rule are `scripts/audit-gitleaks-pinned.sh` and `.gitleaks.toml`. The mutable `cargo-near` shell installer and Foundry bootstrap/`foundryup` installer have been removed. CI now downloads direct versioned release archives, checks hashes, and verifies the available source/artifact provenance.
+- **Scenario and impact:** A committed credential could pass ordinary tests/analyzers unnoticed. A compromised or replaced installer can execute arbitrary code in a CI runner. The workflow retains read-only repository permissions plus `attestations: read` for Foundry verification, and has no deployment secret.
+- **Secret-scanning remediation and evidence:** Gitleaks `8.30.0` is fetched from its versioned release asset and checked against the repository-pinned SHA-256, matching the release API's published digest.[14] The v8.30.0 release is selected over v8.30.1 because an upstream issue reports that v8.30.1's tag is not reachable from `master`; GitHub marks the v8.30.0 release commit as signed.[15][23] The scanner covers the working tree and all locally fetched refs (`--all`); CI uses `fetch-depth: 0`. Reports stay in an explicit temporary directory, use `--redact=100`, and the wrapper emits only paths/lines/rule IDs on findings. A synthetic self-test checks historical and working-tree detection, the GitHub-PAT rule, the supplemental sensitive-JSON-property rule, and redacted output; it passed 20/20 repeated runs. The repository scan found zero findings. The custom rule addresses the upstream `generic-api-key` false negative reproduced for single-line JSON when another property precedes the credential key.[13]
+- **Installer evidence — cargo-near:** CI downloads the pinned `cargo-near 0.22.0` Linux archive. Its archive hash `9429064e30a427e96523f539cb255f3688d2345e5000d7d4e4873a8247247d1a` matches both published checksum files.[18]
+
+  The versioned GitHub release is marked immutable.[16] The pinned source commit `108a48d505148145b419cf1060dc5f3026881984` has a GitHub-verified signature.[20]
+
+  The annotated release tag itself is unsigned.[24] A GitHub artifact-attestation lookup for this archive returned HTTP 404 on October 24, 2026; therefore the checked hash and signed source commit do not independently prove that this binary was built from that source. CI fails closed if GitHub no longer verifies the pinned commit signature or the archive hash changes.
+
+- **Installer evidence — Foundry:** CI downloads the pinned `1.8.6` Linux archive and verifies SHA-256 `58850106984038f3a7200f38a4182c8cb423d3a4f4c7848eacbc2453e6bc35fc`.[19]
+
+  `gh attestation verify` additionally enforces repository `foundry-rs/foundry`, signer workflow `.github/workflows/release.yml`, `refs/tags/v1.8.6`, pinned source commit `6bad0a66de7c83f7b33695044138f0f5fa4c5990`, and GitHub's Actions OIDC issuer; the constrained check passed locally for the exact downloaded archive.[17][21]
+
+  Workflow token scope includes read-only artifact-attestation access.[22]
+- **Remaining gate:** Obtain or create a verifiable artifact-build attestation for cargo-near, or build it from the signed source in a pinned, reviewed build process. Until then, the archive checksum pins exact bytes but does not provide a source-to-binary provenance link. Secret scanning also cannot prove detection of every possible secret format.
+- **Confidence:** High that the tested scanner redaction/detection, archive hashes, cargo-near source-signature check, and Foundry attestation constraints work; cargo-near binary build provenance remains unresolved.
 
 ### 7. Advisory residuals — no safe compatible update was established
 
 - `crypto-bigint 0.5.5` is reached through the NEAR unit-testing dependency path `near-sdk 5.29.1 → near-vm-runner 0.37.4 → p256 0.13.2`; the advisory's fixed release is `0.7.6`, which is not a compatible drop-in for the current parent constraint.[1]
+
 - Crates.io reports latest stable `near-sdk 5.29.1` and `near-vm-runner 0.37.4` in the `0.x` line; the next releases, `5.30.0-rc.1` and `0.38.0-rc.6`, are release candidates. No compatible stable parent update was available in this snapshot.[11][12]
+
 - `lru 0.16.4` is in the same NEAR development/test graph through `near-vm-runner`; RustSec identifies `0.18.2` as the fix. Do not force a lockfile override that violates the parent dependency's supported range.[2]
+
 - `unsafe-libyaml 0.2.11` is pulled through the NEAR development/test graph and is unmaintained; the advisory lists no patched release.[3]
-- The pinned Semgrep CLI was updated from `1.182.0` to PyPI's latest stable `1.182.1` on October 24, 2026.[9]
+
+- The pinned Semgrep CLI was updated from `1.182.0` to PyPI's latest stable `1.182.1` on October 24, 2026.[6][9]
+
 - The v1.182.1 package metadata still requires `mcp==1.29.0` and `opentelemetry-api~=1.37.0`.[10]
+
 - GitHub's MCP advisory identifies `1.30.0` as the 1.x fix.[4]
+
 - GitHub's OpenTelemetry advisory identifies `1.45.1` as the fix.[5]
+
 - The current Semgrep dependency requirements do not permit upgrading those transitive packages independently without changing the scanner's supported environment. The CI invokes the Semgrep scan command; it does not start an MCP server or telemetry service.
+
 - These are retained advisory matches, not a claim that the NEAR Wasm artifact contains all three Rust packages or that the scanner's MCP/telemetry code path is invoked. Re-evaluate when compatible stable upstream releases are available; do not force incompatible overrides.
 
 ## Reproducible Semgrep ruleset
@@ -100,9 +121,9 @@ The rules carry Semgrep Rules License v1.0 metadata. That license permits intern
 ## Validation evidence and limits
 
 - Python: `make lint test PYTHON=/home/ubuntu/.cache/kokonut-protocol-py312/bin/python` — **96 tests passed**; compile and JSON parsing checks passed.
-- NEAR: `cargo fmt --check`, `cargo near check --locked`, `cargo test --locked` — **68 tests passed**; `cargo near build non-reproducible-wasm --locked --out-dir target/deploy` completed. The generated Wasm is development/CI output only and was not deployed.
-- Semgrep `1.182.1`: `make audit-semgrep SEMGREP=/home/ubuntu/.cache/kokonut-semgrep-venv/bin/semgrep` — **49 rules, one Solidity target, zero findings**. A separate disposable mirror with a deliberately incorrect digest exited nonzero with the expected “ruleset digest changed” failure.
-- Full local `make ci` completed Python lint/tests and NEAR check/tests/build, then stopped at `forge: not found` (`Makefile:23`). Foundry, Anvil, Slither, and Aderyn were unavailable in this local environment; therefore local EVM unit/integration and those analyzers were not run. At report-preparation time, no remote CI result for this worktree was available.
+- NEAR: with the checksum-pinned `cargo-near 0.22.0` release, `cargo fmt --check`, `cargo near check --locked`, `cargo test --locked`, and `cargo near build non-reproducible-wasm --locked --out-dir target/deploy` passed; **68 tests passed**. The generated Wasm is development/CI output only and was not deployed.
+- Foundry `1.8.6`: the direct release archive SHA-256 and constrained GitHub attestation passed; `forge fmt --check`, build, and tests passed (**28 tests**, including 32-run/1,024-call invariant campaign). The dual-Anvil local integration test also passed (**1 test**).
+- Full local `make ci` — **passed** with pinned Foundry/cargo-near, Slither `0.11.6` (2 contracts/102 detectors, zero findings), Semgrep `1.182.1` (49 rules, zero findings), Aderyn `0.6.8` (zero High findings), and Gitleaks `8.30.0` (working tree/history both clean; synthetic self-test passed). Remote GitHub Actions has not yet run for this worktree; local success is not a hosted-runner result.
 - The report is bounded to repository source, fixtures, local package metadata, and the cited advisories. No live NEAR signer, EVM RPC, public chain, transaction, or deployment was used.
 
 ## Unchecked PRD item reconciliation (October 24, 2026)
@@ -126,7 +147,7 @@ The 47 unchecked PRD items were rechecked; none is invalidated by this source au
 2. Supply and audit the actual EVM project component, its full authority/upgrade paths, and the exact intended Safe/DAO target.
 3. Confirm NEAR administrator multisig/governance, rotation and recovery procedures, and storage funding/retention policy.
 4. Decide and implement production stale-signature/expiry controls at the destination; the NEAR state transition cannot revoke an already-issued signature.
-5. Harden CI installer provenance and add secret scanning; run the full EVM/Foundry/Anvil/Slither/Aderyn checks on the intended CI toolchain.
+5. Complete cargo-near binary-build provenance with an upstream attestation or a pinned, reviewed source-build process; run and review the hosted GitHub Actions results for the updated pinned-toolchain workflow.
 6. Obtain separate explicit authorization before any testnet deployment, live signature request, or destination-chain activity.
 
 ## Sources
@@ -136,9 +157,22 @@ The 47 unchecked PRD items were rechecked; none is invalidated by this source au
 [3] https://rustsec.org/advisories/RUSTSEC-2024-0449.html
 [4] https://github.com/advisories/GHSA-84m7-p3x7-pcfv
 [5] https://github.com/advisories/GHSA-xcq7-p3pf-p88h
+[6] https://github.com/semgrep/semgrep/releases/tag/v1.182.0
 [7] https://semgrep.dev/legal/rules-license
 [8] https://semgrep.dev/c/p/smart-contracts
 [9] https://pypi.org/pypi/semgrep/json
 [10] https://pypi.org/pypi/semgrep/1.182.1/json
 [11] https://crates.io/api/v1/crates/near-sdk
 [12] https://crates.io/api/v1/crates/near-vm-runner
+[13] https://github.com/gitleaks/gitleaks/issues/2223
+[14] https://api.github.com/repos/gitleaks/gitleaks/releases/tags/v8.30.0
+[15] https://github.com/gitleaks/gitleaks/issues/2086
+[16] https://github.com/near/cargo-near/releases/tag/cargo-near-v0.22.0
+[17] https://github.com/foundry-rs/foundry/releases/tag/v1.8.6
+[18] https://api.github.com/repos/near/cargo-near/releases/tags/cargo-near-v0.22.0
+[19] https://api.github.com/repos/foundry-rs/foundry/releases/tags/v1.8.6
+[20] https://api.github.com/repos/near/cargo-near/git/commits/108a48d505148145b419cf1060dc5f3026881984
+[21] https://cli.github.com/manual/gh_attestation_verify
+[22] https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+[23] https://github.com/gitleaks/gitleaks/releases/tag/v8.30.0
+[24] https://api.github.com/repos/near/cargo-near/git/tags/d40eeed75c5f5f6e4e98ca635629f06bb7c5e13e

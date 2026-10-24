@@ -1,7 +1,8 @@
 PYTHON ?= python3
 SEMGREP ?= semgrep
+GITLEAKS ?=
 
-.PHONY: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep ci
+.PHONY: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep audit-secrets ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -43,4 +44,7 @@ audit-aderyn: lint-evm
 	cd contracts/evm && aderyn . --highs-only --output out/aderyn-high.json
 	$(PYTHON) -c 'import json, pathlib; report=json.loads(pathlib.Path("contracts/evm/out/aderyn-high.json").read_text()); count=report["issue_count"]["high"]; print(f"Aderyn high-severity findings: {count}"); raise SystemExit(count != 0)'
 
-ci: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-aderyn
+audit-secrets:
+	GITLEAKS="$(GITLEAKS)" bash scripts/audit-gitleaks-pinned.sh
+
+ci: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-aderyn audit-secrets
