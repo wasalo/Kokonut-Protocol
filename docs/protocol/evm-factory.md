@@ -16,12 +16,14 @@
 
 This is development/test code, not a production factory, security audit, or deployment approval. Creation-code allowlisting is only as trustworthy as the authority that approves the hash. The prototype does not validate the component's source, governance semantics, vulnerabilities, project-specific authorization payload, or legal/economic rights. A production design still needs reviewed binding between the human-approved NEAR request and all factory calldata, an appropriately governed configuration authority, audited component implementations, destination-chain controls, and independent contract review.
 
-The test toolchain is pinned in `contracts/evm/.foundry-version` and `contracts/evm/foundry.toml`. Run from the repository root:
+The Foundry, Slither, and Aderyn tool versions are pinned under `contracts/evm/`; the Aderyn Linux archive is checksum-verified. Run from the repository root:
 
 ```sh
 make lint-evm
 make test-evm
 make audit-evm
+make audit-semgrep
+make audit-aderyn
 ```
 
-The Slither analysis uses the version pinned in `contracts/evm/.slither-version`; it reports no findings for the current factory. All targets run offline. They do not connect to an EVM network. Do not treat a passing local test or static analysis as evidence of deployment readiness.
+Slither and Aderyn run locally without network access; Semgrep fetches the public `p/smart-contracts` ruleset, with metrics and version checks disabled. The Semgrep gate excludes only its performance rule recommending a payable constructor: accepting ETH is outside this factory's API. Aderyn gates high-severity findings; inspect its generated `contracts/evm/out/aderyn-high.json` report when the gate fails. These automated checks are not an independent audit and do not establish deployment readiness.

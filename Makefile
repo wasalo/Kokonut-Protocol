@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: lint test lint-near test-near build-near lint-evm test-evm audit-evm ci
+.PHONY: lint test lint-near test-near build-near lint-evm test-evm audit-evm audit-aderyn audit-semgrep ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -27,4 +27,13 @@ test-evm:
 audit-evm:
 	cd contracts/evm && slither . --foundry-out-directory out
 
-ci: lint test lint-near test-near build-near lint-evm test-evm audit-evm
+# Keep the constructor nonpayable: accepting ETH is not part of this factory's API.
+# The upstream performance-only rule recommends payable constructors for gas savings.
+audit-semgrep:
+	SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 semgrep scan --config p/smart-contracts --exclude-rule solidity.performance.non-payable-constructor.non-payable-constructor --error contracts/evm/src
+
+audit-aderyn: lint-evm
+	cd contracts/evm && aderyn . --highs-only --output out/aderyn-high.json
+	$(PYTHON) -c 'import json, pathlib; report=json.loads(pathlib.Path("contracts/evm/out/aderyn-high.json").read_text()); count=report["issue_count"]["high"]; print(f"Aderyn high-severity findings: {count}"); raise SystemExit(count != 0)'
+
+ci: lint test lint-near test-near build-near lint-evm test-evm audit-evm audit-semgrep audit-aderyn
