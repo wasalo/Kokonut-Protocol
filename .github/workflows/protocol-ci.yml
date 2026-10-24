@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
@@ -25,6 +27,8 @@ jobs:
     container: rust@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Require a GitHub-hosted build runner
         run: |
           echo "Runner environment: ${RUNNER_ENVIRONMENT:-unset}"
@@ -33,15 +37,13 @@ jobs:
         run: bash scripts/install-ci-native-deps.sh
       - run: rustup target add wasm32-unknown-unknown
       - name: Build cargo-near from signed, pinned source
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="$(tr -d '\r\n' < .cargo-near-version)"
           source_commit="$(tr -d '\r\n' < .cargo-near-source-commit)"
+          # The upstream commit API is public; do not expose a token to build scripts.
           curl --proto '=https' --tlsv1.2 -fsSL \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/near/cargo-near/git/commits/${source_commit}" \
             -o "$RUNNER_TEMP/cargo-near-source-commit.json"
           python3 - "$RUNNER_TEMP/cargo-near-source-commit.json" "$source_commit" <<'PY'
@@ -81,20 +83,20 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Require a GitHub-hosted build runner
         run: |
           echo "Runner environment: ${RUNNER_ENVIRONMENT:-unset}"
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted
       - name: Build Foundry from signed, pinned source
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="$(tr -d '\r\n' < contracts/evm/.foundry-version)"
           source_commit="$(tr -d '\r\n' < contracts/evm/.foundry-source-commit)"
+          # The upstream commit API is public; do not expose a token to build scripts.
           curl --proto '=https' --tlsv1.2 -fsSL \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/foundry-rs/foundry/git/commits/${source_commit}" \
             -o "$RUNNER_TEMP/foundry-source-commit.json"
           python3 - "$RUNNER_TEMP/foundry-source-commit.json" "$source_commit" <<'PY'
@@ -181,6 +183,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Scan working tree and complete Git history
         env:
           RUNNER_TEMP: ${{ runner.temp }}
