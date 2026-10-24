@@ -79,9 +79,11 @@ The dependency graph check confirmed `crypto-bigint 0.5.5`, `lru 0.16.4`, and `u
 
   `gh attestation verify` additionally enforces repository `foundry-rs/foundry`, signer workflow `.github/workflows/release.yml`, `refs/tags/v1.8.6`, pinned source commit `6bad0a66de7c83f7b33695044138f0f5fa4c5990`, and GitHub's Actions OIDC issuer; the constrained check passed locally for the exact downloaded archive.[17][21]
 
+  The exact Foundry certificate reports `runnerEnvironment: self-hosted`. The CLI's `--deny-self-hosted-runners` option would reject this valid attestation, so CI deliberately permits the upstream runner while retaining the repository, workflow, tag, source-commit, and issuer constraints.[21]
+
   Workflow token scope includes read-only artifact-attestation access.[22]
-- **Remaining gate:** Obtain or create a verifiable artifact-build attestation for cargo-near, or build it from the signed source in a pinned, reviewed build process. Until then, the archive checksum pins exact bytes but does not provide a source-to-binary provenance link. Secret scanning also cannot prove detection of every possible secret format.
-- **Confidence:** High that the tested scanner redaction/detection, archive hashes, cargo-near source-signature check, and Foundry attestation constraints work; cargo-near binary build provenance remains unresolved.
+- **Remaining gate:** Obtain or create a verifiable artifact-build attestation for cargo-near, or build it from the signed source in a pinned, reviewed build process. Decide whether to accept Foundry's attested self-hosted release runner or require a trusted alternative. Until then, the cargo-near archive checksum pins exact bytes but does not provide a source-to-binary provenance link. Secret scanning also cannot prove detection of every possible secret format.
+- **Confidence:** High that the tested scanner redaction/detection, archive hashes, cargo-near source-signature check, and Foundry's identity constraints work; cargo-near binary build provenance and the Foundry self-hosted-runner trust decision remain unresolved.
 
 ### 7. Advisory residuals — no safe compatible update was established
 
