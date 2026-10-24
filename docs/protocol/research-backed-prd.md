@@ -2139,7 +2139,7 @@ The following is the implementation order Codex should follow.
 [ ] Create project factory contracts.
 [ ] Ensure permanent admin transfers to project Safe/DAO.
 [ ] Add Foundry fuzz/invariant tests.
-[ ] Run Slither/Semgrep/Aderyn through CI.
+[x] Run Slither/Semgrep/Aderyn through CI.
 
 [ ] Pin and assess Majeur.
 [ ] Create isolated Revenue Container pilot.
