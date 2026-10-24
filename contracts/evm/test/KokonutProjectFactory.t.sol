@@ -74,6 +74,80 @@ contract MockSplitAuthorityComponent {
     }
 }
 
+contract MockMalformedAuthorityManifestComponent {
+    bytes32 public projectId;
+    address public projectAdmin;
+    uint8 private immutable mode;
+
+    constructor(uint8 mode_) {
+        mode = mode_;
+    }
+
+    function initialize(bytes32 projectId_, address projectAdmin_) external {
+        projectId = projectId_;
+        projectAdmin = projectAdmin_;
+    }
+
+    function authoritySurfaces() external view returns (bytes32[] memory roles, address[] memory controllers) {
+        if (mode == 0) return (new bytes32[](0), new address[](0));
+        if (mode == 1) {
+            roles = new bytes32[](1);
+            controllers = new address[](1);
+            roles[0] = keccak256("KOKONUT_OTHER_ROLE");
+            controllers[0] = address(0);
+            return (roles, controllers);
+        }
+        if (mode == 2) {
+            roles = new bytes32[](1);
+            controllers = new address[](1);
+            roles[0] = keccak256("KOKONUT_PROJECT_ADMIN");
+            controllers[0] = address(0);
+            return (roles, controllers);
+        }
+        if (mode == 3) {
+            roles = new bytes32[](2);
+            controllers = new address[](2);
+            roles[0] = keccak256("KOKONUT_PROJECT_ADMIN");
+            roles[1] = keccak256("KOKONUT_PROJECT_ADMIN");
+            controllers[0] = projectAdmin;
+            controllers[1] = projectAdmin;
+            return (roles, controllers);
+        }
+        if (mode == 4) {
+            roles = new bytes32[](1);
+            controllers = new address[](0);
+            roles[0] = keccak256("KOKONUT_PROJECT_ADMIN");
+            return (roles, controllers);
+        }
+        if (mode == 5) {
+            roles = new bytes32[](33);
+            controllers = new address[](33);
+            for (uint256 i; i < 32; ++i) {
+                roles[i] = bytes32(i + 1);
+            }
+            roles[32] = keccak256("KOKONUT_PROJECT_ADMIN");
+            controllers[32] = projectAdmin;
+            return (roles, controllers);
+        }
+        roles = new bytes32[](2);
+        controllers = new address[](2);
+        bytes32 projectAdminRole = keccak256("KOKONUT_PROJECT_ADMIN");
+        bytes32 otherRole = keccak256("KOKONUT_OTHER_ROLE");
+        if (projectAdminRole < otherRole) {
+            roles[0] = otherRole;
+            controllers[0] = address(0);
+            roles[1] = projectAdminRole;
+            controllers[1] = projectAdmin;
+        } else {
+            roles[0] = projectAdminRole;
+            controllers[0] = projectAdmin;
+            roles[1] = otherRole;
+            controllers[1] = address(0);
+        }
+        return (roles, controllers);
+    }
+}
+
 contract MockMismatchingProjectComponent {
     bytes32 public projectId;
     address public projectAdmin;
@@ -226,6 +300,34 @@ contract KokonutProjectFactoryTests {
         require(factory.projectById(PROJECT_ID) == address(0), "rejected component was registered");
     }
 
+    function testRejectsEmptyAuthorityManifest() public {
+        _assertMalformedManifestRejected(0);
+    }
+
+    function testRejectsAuthorityManifestMissingRootAdminRole() public {
+        _assertMalformedManifestRejected(1);
+    }
+
+    function testRejectsMisboundRootAdminRole() public {
+        _assertMalformedManifestRejected(2);
+    }
+
+    function testRejectsDuplicateAuthorityRoleIdentifiers() public {
+        _assertMalformedManifestRejected(3);
+    }
+
+    function testRejectsMismatchedAuthorityManifestArrayLengths() public {
+        _assertMalformedManifestRejected(4);
+    }
+
+    function testRejectsOversizedAuthorityManifest() public {
+        _assertMalformedManifestRejected(5);
+    }
+
+    function testRejectsUnsortedAuthorityRoleIdentifiers() public {
+        _assertMalformedManifestRejected(6);
+    }
+
     function testProjectAdminMustBeAContract() public {
         bytes memory initCode = type(MockProjectComponent).creationCode;
         KokonutProjectFactory factory = _newFactory(keccak256(initCode));
@@ -321,6 +423,16 @@ contract KokonutProjectFactoryTests {
     function testConfigurationAndDeploymentAuthoritiesMustBeDistinct() public {
         vm.expectRevert(KokonutProjectFactory.InvalidAuthoritySeparation.selector);
         new KokonutProjectFactory(CONFIG_AUTHORITY, CONFIG_AUTHORITY);
+    }
+
+    function _assertMalformedManifestRejected(uint8 mode) private {
+        bytes memory initCode =
+            abi.encodePacked(type(MockMalformedAuthorityManifestComponent).creationCode, abi.encode(mode));
+        KokonutProjectFactory factory = _newFactory(keccak256(initCode));
+        vm.prank(DEPLOYMENT_AUTHORITY);
+        vm.expectRevert(KokonutProjectFactory.ProjectAuthorityManifestMismatch.selector);
+        factory.deployProject(PROJECT_ID, PROJECT_ADMIN, initCode);
+        require(factory.projectById(PROJECT_ID) == address(0), "malformed component was registered");
     }
 
     function _newFactory(bytes32 initialAllowedHash) private returns (KokonutProjectFactory) {
