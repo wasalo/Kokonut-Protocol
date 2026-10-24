@@ -1,4 +1,5 @@
 PYTHON ?= python3
+SEMGREP ?= semgrep
 
 .PHONY: lint test lint-near test-near build-near lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep ci
 
@@ -34,7 +35,7 @@ audit-evm:
 # Keep the constructor nonpayable: accepting ETH is not part of this factory's API.
 # The upstream performance-only rule recommends payable constructors for gas savings.
 audit-semgrep:
-	SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 semgrep scan --config p/smart-contracts --exclude-rule solidity.performance.non-payable-constructor.non-payable-constructor --error contracts/evm/src
+	SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 $(SEMGREP) scan --config p/smart-contracts --exclude-rule solidity.performance.non-payable-constructor.non-payable-constructor --error contracts/evm/src
 
 audit-aderyn: lint-evm
 	cd contracts/evm && aderyn . --highs-only --output out/aderyn-high.json
