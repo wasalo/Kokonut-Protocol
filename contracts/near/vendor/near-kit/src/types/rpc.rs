@@ -1,0 +1,3631 @@
+//! RPC response types.
+
+use std::collections::BTreeMap;
+use std::ops::Deref;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::Deserialize;
+use serde_with::{base64::Base64, serde_as};
+
+use super::action::{
+    AccessKey, AccessKeyPermission, Action, AddKeyAction, CreateAccountAction, DelegateAction,
+    DelegateActionV2, DeleteAccountAction, DeleteKeyAction, DeterministicStateInitAction,
+    FunctionCallAction, FunctionCallPermission, GasKeyInfo, GlobalContractId, NonDelegateAction,
+    SignedDelegateAction, StakeAction, StateInit, StateInitV1, TransferAction,
+    TransferToGasKeyAction, UseGlobalContractAction, VersionedDelegateActionPayload,
+    VersionedSignedDelegateAction, WithdrawFromGasKeyAction,
+};
+use super::block_reference::TxExecutionStatus;
+use super::error::{ActionError, TxExecutionError};
+use super::transaction::{NonceMode, TransactionNonce};
+use super::{AccountId, CryptoHash, Gas, NearToken, Nonce, PublicKey, PublicKeyHandle, Signature};
+use crate::error::ActionViewConversionError;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Cost per byte of storage in yoctoNEAR.
+///
+/// This is a protocol constant (10^19 yoctoNEAR per byte = 0.00001 NEAR/byte).
+/// It has remained unchanged since NEAR genesis and would require a hard fork
+/// to modify. Used for calculating available balance.
+///
+/// See: <https://docs.near.org/concepts/storage/storage-staking>
+pub const STORAGE_AMOUNT_PER_BYTE: u128 = 10_000_000_000_000_000_000; // 10^19 yoctoNEAR
+
+// ============================================================================
+// Account types
+// ============================================================================
+
+/// Account information from view_account RPC.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountView {
+    /// Total balance including locked.
+    pub amount: NearToken,
+    /// Locked balance (staked).
+    pub locked: NearToken,
+    /// Hash of deployed contract code (or zeros if none).
+    pub code_hash: CryptoHash,
+    /// Storage used in bytes.
+    pub storage_usage: u64,
+    /// Storage paid at block height (deprecated, always 0).
+    #[serde(default)]
+    pub storage_paid_at: u64,
+    /// Global contract code hash (if using a global contract).
+    #[serde(default)]
+    pub global_contract_hash: Option<CryptoHash>,
+    /// Global contract account ID (if using a global contract by account).
+    #[serde(default)]
+    pub global_contract_account_id: Option<AccountId>,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+impl AccountView {
+    /// Calculate the total NEAR required for storage.
+    fn storage_required(&self) -> NearToken {
+        let yocto = STORAGE_AMOUNT_PER_BYTE.saturating_mul(self.storage_usage as u128);
+        NearToken::from_yoctonear(yocto)
+    }
+
+    /// Get available (spendable) balance.
+    ///
+    /// This accounts for the protocol rule that staked tokens count towards
+    /// the storage requirement:
+    /// - available = amount - max(0, storage_required - locked)
+    ///
+    /// If staked >= storage cost, all liquid balance is available.
+    /// If staked < storage cost, some liquid balance is reserved for storage.
+    pub fn available(&self) -> NearToken {
+        let storage_required = self.storage_required();
+
+        // If staked covers storage, all liquid is available
+        if self.locked >= storage_required {
+            return self.amount;
+        }
+
+        // Otherwise, reserve the difference from liquid balance
+        let reserved_for_storage = storage_required.saturating_sub(self.locked);
+        self.amount.saturating_sub(reserved_for_storage)
+    }
+
+    /// Get the amount of NEAR reserved for storage costs.
+    ///
+    /// This is calculated as: max(0, storage_required - locked)
+    pub fn storage_cost(&self) -> NearToken {
+        let storage_required = self.storage_required();
+
+        if self.locked >= storage_required {
+            NearToken::ZERO
+        } else {
+            storage_required.saturating_sub(self.locked)
+        }
+    }
+
+    /// Check if this account has a deployed contract.
+    pub fn has_contract(&self) -> bool {
+        !self.code_hash.is_zero()
+    }
+}
+
+/// Simplified balance info.
+#[derive(Debug, Clone)]
+pub struct AccountBalance {
+    /// Total balance (available + locked).
+    pub total: NearToken,
+    /// Available balance (spendable, accounting for storage).
+    pub available: NearToken,
+    /// Locked balance (staked).
+    pub locked: NearToken,
+    /// Amount reserved for storage costs.
+    pub storage_cost: NearToken,
+    /// Storage used in bytes.
+    pub storage_usage: u64,
+}
+
+impl std::fmt::Display for AccountBalance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.available)
+    }
+}
+
+impl From<AccountView> for AccountBalance {
+    fn from(view: AccountView) -> Self {
+        Self {
+            total: view.amount,
+            available: view.available(),
+            locked: view.locked,
+            storage_cost: view.storage_cost(),
+            storage_usage: view.storage_usage,
+        }
+    }
+}
+
+/// Access key information from view_access_key RPC.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessKeyView {
+    /// Nonce for replay protection.
+    pub nonce: u64,
+    /// Permission level.
+    pub permission: AccessKeyPermissionView,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+/// Access key details (without block info, used in lists).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessKeyDetails {
+    /// Nonce for replay protection.
+    pub nonce: u64,
+    /// Permission level.
+    pub permission: AccessKeyPermissionView,
+}
+
+/// Access key permission from RPC.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum AccessKeyPermissionView {
+    /// Full access.
+    FullAccess,
+    /// Function call access with restrictions.
+    FunctionCall {
+        /// Maximum amount this key can spend.
+        allowance: Option<NearToken>,
+        /// Contract that can be called.
+        receiver_id: AccountId,
+        /// Methods that can be called (empty = all).
+        method_names: Vec<String>,
+    },
+    /// Gas key with function call access.
+    GasKeyFunctionCall {
+        /// Gas key balance.
+        balance: NearToken,
+        /// Number of nonces.
+        num_nonces: u16,
+        /// Maximum amount this key can spend.
+        allowance: Option<NearToken>,
+        /// Contract that can be called.
+        receiver_id: AccountId,
+        /// Methods that can be called (empty = all).
+        method_names: Vec<String>,
+    },
+    /// Gas key with full access.
+    GasKeyFullAccess {
+        /// Gas key balance.
+        balance: NearToken,
+        /// Number of nonces.
+        num_nonces: u16,
+    },
+}
+
+/// Access key list from view_access_key_list RPC.
+///
+/// One page of an account's access keys. The node caps how many keys a single
+/// response carries (100 by default), so a listing can be truncated:
+/// [`last_key`](Self::last_key) is then the continuation cursor. The fetch-all
+/// helper (`RpcClient::view_access_key_list`, `Near::access_keys`) follows that
+/// cursor for you and always returns `last_key: None`; only
+/// `RpcClient::view_access_key_list_page` hands it back for manual paging.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessKeyListView {
+    /// List of access keys.
+    pub keys: Vec<AccessKeyInfoView>,
+    /// Pagination cursor. `Some` means this page was truncated: pass it as
+    /// `after_key` to fetch the keys after it. `None` means this was the last
+    /// page (or the full list).
+    #[serde(default)]
+    pub last_key: Option<PublicKeyHandle>,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+/// Single access key info in list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessKeyInfoView {
+    /// How the chain identifies the key: the full public key for
+    /// ed25519/secp256k1, or the `ml-dsa-65-hash:` digest for ML-DSA-65 (the
+    /// full key is not stored on-chain). Use
+    /// [`full_pubkey()`](PublicKeyHandle::full_pubkey) to get a usable
+    /// [`PublicKey`], or [`refers_to()`](PublicKeyHandle::refers_to) to check
+    /// it against one.
+    pub public_key: PublicKeyHandle,
+    /// Access key details.
+    pub access_key: AccessKeyDetails,
+}
+
+/// Parallel nonces assigned to a gas key by `view_gas_key_nonces`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GasKeyNoncesView {
+    /// Nonces indexed in the same order as the gas key's nonce slots.
+    pub nonces: Vec<Nonce>,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+// ============================================================================
+// view_state
+// ============================================================================
+
+/// A single contract state entry (key/value), as returned by `view_state`.
+///
+/// `key` and `value` are raw bytes; they are base64-encoded on the wire.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StateItem {
+    /// Raw state key bytes.
+    #[serde_as(as = "Base64")]
+    pub key: Vec<u8>,
+    /// Raw state value bytes.
+    #[serde_as(as = "Base64")]
+    pub value: Vec<u8>,
+}
+
+/// Result of a `view_state` query (one page).
+///
+/// When the trie holds more entries than `limit`, [`ViewStateResult::last_key`]
+/// is the continuation cursor: pass it back as `after_key` to fetch the next
+/// page. It is `None` on the last page.
+///
+/// Like every `query` view, it carries the block the page was read at.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ViewStateResult {
+    /// The contract state entries in this page.
+    pub values: Vec<StateItem>,
+    /// Continuation cursor (raw key bytes). Absent on the last page.
+    #[serde_as(as = "Option<Base64>")]
+    #[serde(default)]
+    pub last_key: Option<Vec<u8>>,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+/// A contract's full state as collected by `view_state_all`.
+///
+/// `values` holds every matching [`StateItem`] across all pages. Like every
+/// `query` view it carries the block the state was read at: `block_height` and
+/// `block_hash` come from the first page, and every subsequent page was
+/// requested against that same `block_hash`, so the whole result is a
+/// consistent snapshot of one block.
+///
+/// The type derefs to `[StateItem]` and iterates over its entries, so
+/// `result.len()`, `result.iter()`, `&result[0]` and `for item in result` all
+/// work directly; use [`ViewStateAllResult::into_values`] to take ownership of
+/// the entries alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewStateAllResult {
+    /// Every contract state entry matching the prefix, in trie order.
+    pub values: Vec<StateItem>,
+    /// Block height the state was read at (taken from the first page).
+    pub block_height: u64,
+    /// Block hash the state was read at (taken from the first page); every
+    /// page was read against this hash.
+    pub block_hash: CryptoHash,
+}
+
+impl ViewStateAllResult {
+    /// Consume the result and return just the state entries.
+    pub fn into_values(self) -> Vec<StateItem> {
+        self.values
+    }
+}
+
+impl Deref for ViewStateAllResult {
+    type Target = [StateItem];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl IntoIterator for ViewStateAllResult {
+    type Item = StateItem;
+    type IntoIter = std::vec::IntoIter<StateItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ViewStateAllResult {
+    type Item = &'a StateItem;
+    type IntoIter = std::slice::Iter<'a, StateItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
+// ============================================================================
+// view_code / view_global_contract_code
+// ============================================================================
+
+/// A contract's WASM code and its hash, as returned by `view_code` and
+/// `view_global_contract_code` queries.
+///
+/// `code` is raw WASM bytes; it is base64-encoded on the wire. `hash` is the
+/// SHA-256 hash of the code. Like every `query` view, it carries the block the
+/// code was read at.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ContractCodeView {
+    /// Raw WASM bytes of the contract.
+    #[serde(rename = "code_base64")]
+    #[serde_as(as = "Base64")]
+    pub code: Vec<u8>,
+    /// SHA-256 hash of the code.
+    pub hash: CryptoHash,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+// ============================================================================
+// Stabilized RPC method responses (protocol 2.13)
+// ============================================================================
+
+/// One entry in a [`BlockEffects`] response: which kind of state was touched
+/// for an account in the block.
+///
+/// `block_effects` reports only the *kind* of change per account (no cause or
+/// value), so this is a lighter view than the per-account
+/// `StateChangeWithCauseView`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum StateChangeKindView {
+    /// The account itself (balance, etc.) was touched.
+    AccountTouched {
+        /// The account that was touched.
+        account_id: AccountId,
+    },
+    /// One of the account's access keys was touched.
+    AccessKeyTouched {
+        /// The account that was touched.
+        account_id: AccountId,
+    },
+    /// The account's contract data (storage) was touched.
+    DataTouched {
+        /// The account that was touched.
+        account_id: AccountId,
+    },
+    /// The account's contract code was touched.
+    ContractCodeTouched {
+        /// The account that was touched.
+        account_id: AccountId,
+    },
+}
+
+/// All state changes within a single block, from the `block_effects` RPC
+/// (stabilized name for `EXPERIMENTAL_changes_in_block`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockEffects {
+    /// Hash of the block these changes belong to.
+    pub block_hash: CryptoHash,
+    /// The kinds of state change applied in this block (one entry per touched
+    /// account/state-kind).
+    pub changes: Vec<StateChangeKindView>,
+}
+
+/// A single maintenance window — a half-open block-height range
+/// `[start, end)` during which a validator has no chunk/block production
+/// duties. Returned by the `maintenance_windows` RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct MaintenanceWindow {
+    /// First block height of the window (inclusive).
+    pub start: u64,
+    /// Block height the window ends at (exclusive).
+    pub end: u64,
+}
+
+// ============================================================================
+// Block types
+// ============================================================================
+
+/// Block information from block RPC.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockView {
+    /// Block author (validator account ID).
+    pub author: AccountId,
+    /// Block header.
+    pub header: BlockHeaderView,
+    /// List of chunks in the block.
+    pub chunks: Vec<ChunkHeaderView>,
+}
+
+/// Block header with full details.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockHeaderView {
+    /// Block height.
+    pub height: u64,
+    /// Previous block height (may be None for genesis).
+    #[serde(default)]
+    pub prev_height: Option<u64>,
+    /// Block hash.
+    pub hash: CryptoHash,
+    /// Previous block hash.
+    pub prev_hash: CryptoHash,
+    /// Previous state root.
+    pub prev_state_root: CryptoHash,
+    /// Chunk receipts root.
+    pub chunk_receipts_root: CryptoHash,
+    /// Chunk headers root.
+    pub chunk_headers_root: CryptoHash,
+    /// Chunk transaction root.
+    pub chunk_tx_root: CryptoHash,
+    /// Outcome root.
+    pub outcome_root: CryptoHash,
+    /// Number of chunks included.
+    pub chunks_included: u64,
+    /// Challenges root.
+    pub challenges_root: CryptoHash,
+    /// Timestamp in nanoseconds (as u64).
+    pub timestamp: u64,
+    /// Timestamp in nanoseconds (as string for precision).
+    pub timestamp_nanosec: String,
+    /// Random value for the block.
+    pub random_value: CryptoHash,
+    /// Validator proposals.
+    #[serde(default)]
+    pub validator_proposals: Vec<ValidatorStakeView>,
+    /// Chunk mask (which shards have chunks).
+    #[serde(default)]
+    pub chunk_mask: Vec<bool>,
+    /// Gas price for this block.
+    pub gas_price: NearToken,
+    /// Block ordinal (may be None).
+    #[serde(default)]
+    pub block_ordinal: Option<u64>,
+    /// Total supply of NEAR tokens.
+    pub total_supply: NearToken,
+    /// Challenges result.
+    #[serde(default)]
+    pub challenges_result: Vec<SlashedValidator>,
+    /// Last final block hash.
+    pub last_final_block: CryptoHash,
+    /// Last DS final block hash.
+    pub last_ds_final_block: CryptoHash,
+    /// Epoch ID.
+    pub epoch_id: CryptoHash,
+    /// Next epoch ID.
+    pub next_epoch_id: CryptoHash,
+    /// Next block producer hash.
+    pub next_bp_hash: CryptoHash,
+    /// Block merkle root.
+    pub block_merkle_root: CryptoHash,
+    /// Epoch sync data hash (optional).
+    #[serde(default)]
+    pub epoch_sync_data_hash: Option<CryptoHash>,
+    /// Block body hash (optional, added in later protocol versions).
+    #[serde(default)]
+    pub block_body_hash: Option<CryptoHash>,
+    /// Block approvals (nullable signatures).
+    #[serde(default)]
+    pub approvals: Vec<Option<Signature>>,
+    /// Block signature.
+    pub signature: Signature,
+    /// Latest protocol version.
+    pub latest_protocol_version: u32,
+    /// Rent paid (deprecated; when present, always 0).
+    #[serde(default)]
+    pub rent_paid: Option<NearToken>,
+    /// Validator reward (deprecated; when present, always 0).
+    #[serde(default)]
+    pub validator_reward: Option<NearToken>,
+    /// Chunk endorsements (optional).
+    #[serde(default)]
+    pub chunk_endorsements: Option<Vec<Vec<u8>>>,
+    /// Shard split info (optional).
+    #[serde(default)]
+    pub shard_split: Option<(u64, AccountId)>,
+}
+
+/// Validator stake (versioned).
+///
+/// Used for validator proposals in block/chunk headers.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ValidatorStakeView {
+    /// Version 1 (current).
+    V1(ValidatorStakeViewV1),
+}
+
+/// Validator stake data.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValidatorStakeViewV1 {
+    /// Validator account ID.
+    pub account_id: AccountId,
+    /// Public key.
+    pub public_key: PublicKey,
+    /// Stake amount.
+    pub stake: NearToken,
+}
+
+impl ValidatorStakeView {
+    /// Get the inner V1 data.
+    pub fn into_v1(self) -> ValidatorStakeViewV1 {
+        match self {
+            Self::V1(v) => v,
+        }
+    }
+
+    /// Get the account ID.
+    pub fn account_id(&self) -> &AccountId {
+        match self {
+            Self::V1(v) => &v.account_id,
+        }
+    }
+
+    /// Get the stake amount.
+    pub fn stake(&self) -> NearToken {
+        match self {
+            Self::V1(v) => v.stake,
+        }
+    }
+}
+
+/// Slashed validator from challenge results.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlashedValidator {
+    /// Validator account ID.
+    pub account_id: AccountId,
+    /// Whether this was a double sign.
+    pub is_double_sign: bool,
+}
+
+/// Chunk header with full details.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChunkHeaderView {
+    /// Chunk hash.
+    pub chunk_hash: CryptoHash,
+    /// Previous block hash.
+    pub prev_block_hash: CryptoHash,
+    /// Outcome root.
+    pub outcome_root: CryptoHash,
+    /// Previous state root.
+    pub prev_state_root: CryptoHash,
+    /// Encoded merkle root.
+    pub encoded_merkle_root: CryptoHash,
+    /// Encoded length.
+    pub encoded_length: u64,
+    /// Height when chunk was created.
+    pub height_created: u64,
+    /// Height when chunk was included.
+    pub height_included: u64,
+    /// Shard ID.
+    pub shard_id: u64,
+    /// Gas used in this chunk.
+    pub gas_used: u64,
+    /// Gas limit for this chunk.
+    pub gas_limit: u64,
+    /// Validator reward.
+    pub validator_reward: NearToken,
+    /// Balance burnt.
+    pub balance_burnt: NearToken,
+    /// Outgoing receipts root.
+    pub outgoing_receipts_root: CryptoHash,
+    /// Transaction root.
+    pub tx_root: CryptoHash,
+    /// Validator proposals.
+    #[serde(default)]
+    pub validator_proposals: Vec<ValidatorStakeView>,
+    /// Congestion info (optional, added in later protocol versions).
+    #[serde(default)]
+    pub congestion_info: Option<CongestionInfoView>,
+    /// Bandwidth requests (optional, added in later protocol versions).
+    #[serde(default)]
+    pub bandwidth_requests: Option<BandwidthRequests>,
+    /// Rent paid (deprecated; when present, always 0).
+    #[serde(default)]
+    pub rent_paid: Option<NearToken>,
+    /// Proposed trie split for resharding.
+    ///
+    /// - `None` — field absent (older protocol versions)
+    /// - `Some(None)` — field present as JSON `null` (no split proposed)
+    /// - `Some(Some(split))` — active split proposal
+    #[serde(default)]
+    pub proposed_split: Option<Option<TrieSplit>>,
+    /// Chunk signature.
+    pub signature: Signature,
+}
+
+/// Bandwidth requests for a chunk (versioned).
+#[derive(Debug, Clone, Deserialize)]
+pub enum BandwidthRequests {
+    /// Version 1.
+    V1(BandwidthRequestsV1),
+}
+
+/// Bandwidth requests data (V1).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BandwidthRequestsV1 {
+    /// List of bandwidth requests.
+    pub requests: Vec<BandwidthRequest>,
+}
+
+/// A single bandwidth request to a target shard.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BandwidthRequest {
+    /// Target shard index.
+    pub to_shard: u16,
+    /// Bitmap of requested values.
+    pub requested_values_bitmap: BandwidthRequestBitmap,
+}
+
+/// Bitmap for bandwidth request values.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BandwidthRequestBitmap {
+    /// Raw bitmap data.
+    pub data: [u8; 5],
+}
+
+/// Trie split information for resharding.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrieSplit {
+    /// Account boundary for the split.
+    pub boundary_account: AccountId,
+    /// Memory usage of the left child.
+    pub left_memory: u64,
+    /// Memory usage of the right child.
+    pub right_memory: u64,
+}
+
+/// Congestion information for a shard.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CongestionInfoView {
+    /// Gas used by delayed receipts.
+    #[serde(default, deserialize_with = "dec_format")]
+    pub delayed_receipts_gas: u128,
+    /// Gas used by buffered receipts.
+    #[serde(default, deserialize_with = "dec_format")]
+    pub buffered_receipts_gas: u128,
+    /// Bytes used by receipts.
+    #[serde(default)]
+    pub receipt_bytes: u64,
+    /// Allowed shard.
+    #[serde(default)]
+    pub allowed_shard: u16,
+}
+
+/// Deserialize a u128 from a decimal string (NEAR RPC sends u128 as strings).
+fn dec_format<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        String(String),
+        Num(u128),
+    }
+    match StringOrNum::deserialize(deserializer)? {
+        StringOrNum::String(s) => s.parse().map_err(serde::de::Error::custom),
+        StringOrNum::Num(n) => Ok(n),
+    }
+}
+
+/// Deserialize a Gas (u64) from a decimal string or number.
+fn gas_dec_format<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Gas, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        String(String),
+        Num(u64),
+    }
+    let raw = match StringOrNum::deserialize(deserializer)? {
+        StringOrNum::String(s) => s.parse::<u64>().map_err(serde::de::Error::custom)?,
+        StringOrNum::Num(n) => n,
+    };
+    Ok(Gas::from_gas(raw))
+}
+
+/// Gas price response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GasPrice {
+    /// Gas price in yoctoNEAR.
+    pub gas_price: NearToken,
+}
+
+impl GasPrice {
+    /// Get gas price as u128.
+    pub fn as_u128(&self) -> u128 {
+        self.gas_price.as_yoctonear()
+    }
+}
+
+// ============================================================================
+// Transaction outcome types
+// ============================================================================
+
+/// Overall transaction execution status.
+///
+/// Represents the final result of a transaction, matching nearcore's `FinalExecutionStatus`.
+/// This is the `status` field in `FinalExecutionOutcome`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub enum FinalExecutionStatus {
+    /// The transaction has not yet started execution.
+    #[default]
+    NotStarted,
+    /// The transaction has started but the first receipt hasn't completed.
+    Started,
+    /// The transaction execution failed.
+    Failure(TxExecutionError),
+    /// The transaction execution succeeded (base64-encoded return value).
+    SuccessValue(String),
+}
+
+/// Response returned for non-executed wait levels.
+///
+/// When you use a non-executed wait level ([`Submitted`](crate::transaction::Submitted),
+/// [`Included`](crate::transaction::Included), [`IncludedFinal`](crate::transaction::IncludedFinal)),
+/// the transaction hasn't finished executing, so this type carries the
+/// information needed to poll for the final result later via
+/// `Near::tx_status`.
+///
+/// # The `outcome` field
+///
+/// Whether a (partial) execution outcome is available depends on which RPC
+/// produced the response, not on the wait level alone:
+///
+/// - Via `Near::send` / `.send()` (the `send_tx` RPC): the
+///   node returns no execution outcome at these early levels, so `outcome` is
+///   [`None`].
+/// - Via `Near::tx_status` (the `EXPERIMENTAL_tx_status`
+///   RPC): the node returns the execution outcome as soon as it has one — its
+///   `receipts_outcome` (per-receipt status) and `receipts` (so a receiver_id
+///   can be mapped to a UI stage) — even at `Submitted`/`Included`. `outcome` is
+///   [`Some`] once that data exists. It is *partial* while the transaction is
+///   still running and *complete* once it has finished (e.g. when polling a tx
+///   that already settled). This is what lets a frontend poll `tx_status` at an
+///   early wait level to drive a progressive UI without blocking for finality.
+///
+/// The outcome is exposed as-is (not validated); inspect
+/// [`FinalExecutionOutcome::status`] to see how far execution has progressed.
+///
+/// # Example
+///
+#[cfg_attr(feature = "rpc", doc = "```rust,no_run")]
+#[cfg_attr(not(feature = "rpc"), doc = "```rust,ignore")]
+/// # use near_kit::*;
+/// # use near_kit::transaction::Included;
+/// # async fn example(near: &Near) -> Result<(), Error> {
+/// let response = near.transfer("bob.testnet", NearToken::from_near(1))
+///     .wait_until::<Included>()
+///     .await?;
+///
+/// // Later, poll for progress without waiting for finality. At early wait
+/// // levels EXPERIMENTAL_tx_status still returns per-receipt data:
+/// let status = near
+///     .tx_status(&response.transaction_hash, &response.sender_id)
+///     .wait_until::<Included>()
+///     .await?;
+/// if let Some(outcome) = &status.outcome {
+///     for receipt_outcome in &outcome.receipts_outcome {
+///         // drive a progressive UI from each receipt's status
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct SendTxResponse {
+    /// Hash of the submitted transaction.
+    pub transaction_hash: CryptoHash,
+    /// Account ID of the transaction signer.
+    pub sender_id: AccountId,
+    /// Execution outcome, when the RPC returned one.
+    ///
+    /// May be partial (while the transaction is still executing) or complete
+    /// (when polling a tx that has already finished). Populated (with
+    /// `receipts_outcome`/`receipts`) when this response comes from
+    /// `Near::tx_status` and the node already has
+    /// outcome data; [`None`] for the `send_tx` path at these early wait levels.
+    /// See the [type-level docs](SendTxResponse) for details.
+    pub outcome: Option<FinalExecutionOutcome>,
+}
+
+/// Response from `EXPERIMENTAL_receipt_to_tx`: the transaction that produced a receipt.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReceiptToTxResponse {
+    /// Hash of the transaction that produced the receipt.
+    pub transaction_hash: CryptoHash,
+    /// Account that signed the transaction.
+    pub sender_account_id: AccountId,
+}
+
+/// Raw RPC response for transaction submission/status (internal).
+///
+/// Used internally to deserialize responses from `send_tx` and
+/// `EXPERIMENTAL_tx_status` before converting to user-facing types
+/// via [`WaitLevel::convert`](crate::transaction::WaitLevel::convert).
+#[doc(hidden)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawTransactionResponse {
+    /// Transaction hash — populated after deserialization from the signed tx
+    /// (for `send_tx`) or from the outcome (for `tx_status`).
+    #[serde(skip)]
+    pub transaction_hash: CryptoHash,
+    /// The wait level that was reached.
+    pub final_execution_status: TxExecutionStatus,
+    /// The execution outcome, present when the transaction has been executed.
+    #[serde(flatten)]
+    pub outcome: Option<FinalExecutionOutcome>,
+}
+
+/// Final execution outcome from a NEAR transaction.
+///
+/// Returned by both `send_tx` and `EXPERIMENTAL_tx_status` RPC methods.
+/// All fields are required — this type only appears when a transaction has
+/// actually been executed (not for non-executed wait levels).
+///
+/// The `receipts` field contains full receipt details when the outcome comes
+/// from `EXPERIMENTAL_tx_status` (i.e. `near.tx_status()`). When the outcome
+/// comes from `send_tx` (i.e. `near.send()`), this field is an empty `Vec`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FinalExecutionOutcome {
+    /// Overall transaction execution result.
+    pub status: FinalExecutionStatus,
+    /// The transaction that was executed.
+    pub transaction: TransactionView,
+    /// Outcome of the transaction itself.
+    pub transaction_outcome: ExecutionOutcomeWithId,
+    /// Outcomes of all receipts spawned by the transaction.
+    pub receipts_outcome: Vec<ExecutionOutcomeWithId>,
+    /// Full receipt details (populated by `tx_status`, empty from `send`).
+    #[serde(default)]
+    pub receipts: Vec<Receipt>,
+}
+
+impl FinalExecutionOutcome {
+    /// Check if the transaction succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(&self.status, FinalExecutionStatus::SuccessValue(_))
+    }
+
+    /// Check if the transaction failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(&self.status, FinalExecutionStatus::Failure(_))
+    }
+
+    /// Get the failure message if present.
+    pub fn failure_message(&self) -> Option<String> {
+        match &self.status {
+            FinalExecutionStatus::Failure(err) => Some(err.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Get the typed execution error if present.
+    pub fn failure_error(&self) -> Option<&TxExecutionError> {
+        match &self.status {
+            FinalExecutionStatus::Failure(err) => Some(err),
+            _ => None,
+        }
+    }
+
+    /// Get the transaction hash.
+    pub fn transaction_hash(&self) -> &CryptoHash {
+        &self.transaction_outcome.id
+    }
+
+    /// Every log line the transaction emitted: the transaction outcome's
+    /// logs, then each receipt outcome's logs in the order the RPC lists them.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use near_kit::rpc::FinalExecutionOutcome;
+    /// fn events(outcome: &FinalExecutionOutcome) -> Vec<&str> {
+    ///     outcome
+    ///         .logs()
+    ///         .filter_map(|log| log.strip_prefix("EVENT_JSON:"))
+    ///         .collect()
+    /// }
+    /// ```
+    pub fn logs(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(&self.transaction_outcome)
+            .chain(&self.receipts_outcome)
+            .flat_map(|outcome| outcome.outcome.logs.iter().map(String::as_str))
+    }
+
+    /// Get total gas used across all receipts.
+    pub fn total_gas_used(&self) -> Gas {
+        let tx_gas = self.transaction_outcome.outcome.gas_burnt.as_gas();
+        let receipt_gas: u64 = self
+            .receipts_outcome
+            .iter()
+            .map(|r| r.outcome.gas_burnt.as_gas())
+            .sum();
+        Gas::from_gas(tx_gas + receipt_gas)
+    }
+
+    /// Get the return value as raw bytes (base64-decoded).
+    ///
+    /// Returns `Err` if the execution status is not `SuccessValue` (including
+    /// transaction validation or action failures), or if the value is not
+    /// valid base64.
+    ///
+    /// Note: When using the high-level transaction API, only transaction
+    /// *validation* failures return `Err(Error::InvalidTx(..))` from the
+    /// send call. On-chain action failures are returned as `Ok(outcome)`
+    /// with `outcome.is_failure() == true`. This method is primarily useful
+    /// when working with the low-level `rpc().send_tx()` API or when you
+    /// already have an outcome and want to decode its return value.
+    pub fn result(&self) -> Result<Vec<u8>, crate::error::Error> {
+        match &self.status {
+            FinalExecutionStatus::Failure(TxExecutionError::InvalidTxError(e)) => {
+                Err(crate::error::Error::InvalidTx(Box::new(e.clone())))
+            }
+            FinalExecutionStatus::Failure(TxExecutionError::ActionError(e)) => Err(
+                crate::error::Error::InvalidTransaction(format!("Action error: {e}")),
+            ),
+            FinalExecutionStatus::SuccessValue(s) => STANDARD.decode(s).map_err(|e| {
+                crate::error::Error::InvalidTransaction(format!(
+                    "Failed to decode base64 SuccessValue: {e}"
+                ))
+            }),
+            other => Err(crate::error::Error::InvalidTransaction(format!(
+                "Transaction status is {:?}, expected SuccessValue",
+                other,
+            ))),
+        }
+    }
+
+    /// Deserialize the return value as JSON.
+    ///
+    /// Returns `Err` if `result()` fails (on-chain failure, unexpected status,
+    /// or invalid base64) or if JSON deserialization fails.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, crate::error::Error> {
+        let bytes = self.result()?;
+        // Empty SuccessValue (void change method) -> treat as null.
+        let bytes: &[u8] = if bytes.is_empty() { b"null" } else { &bytes };
+        serde_json::from_slice(bytes).map_err(crate::error::Error::from)
+    }
+}
+
+/// Per-receipt execution status.
+///
+/// Matches nearcore's `ExecutionStatusView`. Used in [`ExecutionOutcome`].
+///
+/// The `Failure` variant contains an [`ActionError`] rather than
+/// [`TxExecutionError`] because receipt execution outcomes can only fail with
+/// action errors. Transaction-validation errors (`InvalidTxError`) are caught
+/// earlier in the send path and surfaced as [`crate::Error::InvalidTx`].
+///
+/// The NEAR RPC serialises the failure as `{"Failure": {"ActionError": {…}}}`.
+/// A custom [`Deserialize`] impl unwraps the outer `TxExecutionError` envelope.
+#[derive(Debug, Clone)]
+pub enum ExecutionStatus {
+    /// The execution is pending or unknown.
+    Unknown,
+    /// Execution failed with an action error.
+    Failure(ActionError),
+    /// Execution succeeded with a return value.
+    SuccessValue(Vec<u8>),
+    /// Execution succeeded, producing a receipt.
+    SuccessReceiptId(CryptoHash),
+}
+
+impl ExecutionStatus {
+    /// Whether the receipt succeeded, with a return value or a new receipt.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::SuccessValue(_) | Self::SuccessReceiptId(_))
+    }
+
+    /// Whether the receipt failed.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure(_))
+    }
+
+    /// The receipt's return value, if it returned one.
+    ///
+    /// A receipt that hands its result to another receipt
+    /// ([`SuccessReceiptId`](Self::SuccessReceiptId)) has no value of its own.
+    ///
+    /// # Example
+    ///
+    /// Find the value a specific contract returned anywhere in a transaction:
+    ///
+    /// ```rust
+    /// # use near_kit::AccountId;
+    /// # use near_kit::rpc::FinalExecutionOutcome;
+    /// fn returned_by(outcome: &FinalExecutionOutcome, contract: &AccountId) -> Option<Vec<u8>> {
+    ///     outcome
+    ///         .receipts_outcome
+    ///         .iter()
+    ///         .filter(|o| &o.outcome.executor_id == contract)
+    ///         .find_map(|o| o.outcome.status.success_value())
+    ///         .map(<[u8]>::to_vec)
+    /// }
+    /// ```
+    pub fn success_value(&self) -> Option<&[u8]> {
+        match self {
+            Self::SuccessValue(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The action error, if the receipt failed.
+    pub fn failure(&self) -> Option<&ActionError> {
+        match self {
+            Self::Failure(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ExecutionStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Mirror of the on-wire format that serde can derive.
+        #[serde_as]
+        #[derive(Deserialize)]
+        enum Raw {
+            Unknown,
+            Failure(TxExecutionError),
+            SuccessValue(#[serde_as(as = "Base64")] Vec<u8>),
+            SuccessReceiptId(CryptoHash),
+        }
+
+        match Raw::deserialize(deserializer)? {
+            Raw::Unknown => Ok(Self::Unknown),
+            Raw::Failure(TxExecutionError::ActionError(e)) => Ok(Self::Failure(e)),
+            Raw::Failure(TxExecutionError::InvalidTxError(e)) => Err(serde::de::Error::custom(
+                format!("unexpected InvalidTxError in receipt execution status: {e}"),
+            )),
+            Raw::SuccessValue(v) => Ok(Self::SuccessValue(v)),
+            Raw::SuccessReceiptId(h) => Ok(Self::SuccessReceiptId(h)),
+        }
+    }
+}
+
+/// Transaction view in outcome.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TransactionView {
+    /// Signer account.
+    pub signer_id: AccountId,
+    /// Signer public key.
+    pub public_key: PublicKey,
+    /// Transaction nonce.
+    pub nonce: u64,
+    /// Receiver account.
+    pub receiver_id: AccountId,
+    /// Transaction hash.
+    pub hash: CryptoHash,
+    /// Actions in the transaction.
+    #[serde(default)]
+    pub actions: Vec<ActionView>,
+    /// Transaction signature.
+    pub signature: Signature,
+    /// Priority fee (optional, for congestion pricing).
+    #[serde(default)]
+    pub priority_fee: Option<u64>,
+    /// Nonce index (for gas key multi-nonce support).
+    #[serde(default)]
+    pub nonce_index: Option<u16>,
+    /// Nonce validation mode (`None` from nodes older than nearcore 2.12; means monotonic).
+    #[serde(default)]
+    pub nonce_mode: Option<NonceMode>,
+}
+
+// ============================================================================
+// Global contract identifier view
+// ============================================================================
+
+/// Backward-compatible deserialization helper for `GlobalContractIdentifierView`.
+///
+/// Handles the view format (`{"hash": "<base58>"}` / `{"account_id": "alice.near"}`),
+/// the pre-2.12 identifier format (`{"CodeHash": "<base58>"}` / `{"AccountId":
+/// "alice.near"}`, used by `NO_GLOBAL_CONTRACT_CODE` errors before nearcore#15539),
+/// and the deprecated format (bare string `"<base58>"` / `"alice.near"`).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GlobalContractIdCompat {
+    CodeHash {
+        hash: CryptoHash,
+    },
+    AccountId {
+        account_id: AccountId,
+    },
+    LegacyCodeHash {
+        #[serde(rename = "CodeHash")]
+        hash: CryptoHash,
+    },
+    LegacyAccountId {
+        #[serde(rename = "AccountId")]
+        account_id: AccountId,
+    },
+    DeprecatedCodeHash(CryptoHash),
+    DeprecatedAccountId(AccountId),
+}
+
+/// Global contract identifier in RPC view responses.
+///
+/// Identifies a global contract either by its code hash (immutable) or by the
+/// publishing account ID (updatable). Supports both the current and deprecated
+/// JSON serialization formats from nearcore.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "GlobalContractIdCompat")]
+pub enum GlobalContractIdentifierView {
+    /// Referenced by code hash.
+    CodeHash(CryptoHash),
+    /// Referenced by publisher account ID.
+    AccountId(AccountId),
+}
+
+impl From<GlobalContractIdCompat> for GlobalContractIdentifierView {
+    fn from(compat: GlobalContractIdCompat) -> Self {
+        match compat {
+            GlobalContractIdCompat::CodeHash { hash }
+            | GlobalContractIdCompat::LegacyCodeHash { hash }
+            | GlobalContractIdCompat::DeprecatedCodeHash(hash) => Self::CodeHash(hash),
+            GlobalContractIdCompat::AccountId { account_id }
+            | GlobalContractIdCompat::LegacyAccountId { account_id }
+            | GlobalContractIdCompat::DeprecatedAccountId(account_id) => {
+                Self::AccountId(account_id)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for GlobalContractIdentifierView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CodeHash(hash) => write!(f, "hash({hash})"),
+            Self::AccountId(account_id) => write!(f, "{account_id}"),
+        }
+    }
+}
+
+// ============================================================================
+// Action view
+// ============================================================================
+
+/// View of a delegate action in RPC responses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DelegateActionView {
+    /// The account that signed the delegate action.
+    pub sender_id: AccountId,
+    /// The intended receiver of the inner actions.
+    pub receiver_id: AccountId,
+    /// The actions to execute.
+    pub actions: Vec<ActionView>,
+    /// Nonce for replay protection.
+    pub nonce: u64,
+    /// Maximum block height before this delegate action expires.
+    pub max_block_height: u64,
+    /// Public key of the signer.
+    pub public_key: PublicKey,
+}
+
+/// Nonce as it appears in a `DelegateV2` action view.
+///
+/// Externally tagged to match the node's JSON for nearcore's `TransactionNonce`:
+/// `{"Nonce": {"nonce": N}}` for an ordinary key, or
+/// `{"GasKeyNonce": {"nonce": N, "nonce_index": I}}` for a gas key.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum TransactionNonceView {
+    /// Ordinary access-key nonce.
+    Nonce {
+        /// The nonce value.
+        nonce: u64,
+    },
+    /// Gas-key nonce selecting one of the key's parallel nonces.
+    GasKeyNonce {
+        /// The nonce value for the selected parallel nonce.
+        nonce: u64,
+        /// Which parallel nonce this advances.
+        nonce_index: u16,
+    },
+}
+
+/// View of a `DelegateActionV2` (gas-key meta-transaction) in RPC responses.
+///
+/// Mirrors nearcore's `DelegateActionV2`: like [`DelegateActionView`] but its
+/// `nonce` is a gas-key-capable [`TransactionNonceView`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct DelegateActionV2View {
+    /// The account that signed the delegate action.
+    pub sender_id: AccountId,
+    /// The intended receiver of the inner actions.
+    pub receiver_id: AccountId,
+    /// The actions to execute.
+    pub actions: Vec<ActionView>,
+    /// Nonce for replay protection (gas-key capable).
+    pub nonce: TransactionNonceView,
+    /// Maximum block height before this delegate action expires.
+    pub max_block_height: u64,
+    /// Public key of the signer.
+    pub public_key: PublicKey,
+}
+
+/// Versioned delegate-action payload as it appears in a `DelegateV2` view.
+///
+/// Externally tagged to match the node's JSON for nearcore's
+/// `VersionedDelegateActionPayload`: `{"V2": { ...DelegateActionV2View... }}`.
+#[derive(Debug, Clone, Deserialize)]
+pub enum VersionedDelegateActionPayloadView {
+    /// The V2 (gas-key) delegate action.
+    V2(DelegateActionV2View),
+}
+
+/// Action view in transaction.
+///
+/// This is the node's JSON rendering of an [`Action`], as found in
+/// `tx_status` responses ([`TransactionView::actions`]) and in action receipts.
+/// Non-deploy variants can be turned back into an [`Action`] with
+/// [`TryFrom<ActionView>`](Action#impl-TryFrom<ActionView>-for-Action). Deploy
+/// variants are rejected because the view omits the contract code.
+///
+/// # Deploy views carry the code *hash*, not the WASM
+///
+/// [`DeployContract`](Self::DeployContract),
+/// [`DeployGlobalContract`](Self::DeployGlobalContract) and
+/// [`DeployGlobalContractByAccountId`](Self::DeployGlobalContractByAccountId)
+/// do **not** contain the contract code. The node replaces the WASM with the
+/// base64 of its 32-byte SHA-256 code hash before serving the view (nearcore
+/// `views.rs`: `hash(&action.code).as_ref().to_vec()`). Use
+/// [`deploy_code_hash`](Self::deploy_code_hash) to read it as a
+/// [`CryptoHash`]. Converting the view into an [`Action`] returns
+/// [`ActionViewConversionError::DeployCodeUnavailable`]; do not treat the
+/// decoded bytes as WASM, and do not hash them again.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ActionView {
+    CreateAccount,
+    /// Deploy a contract to the account.
+    ///
+    /// **`code` is the base64 of the 32-byte SHA-256 code hash, not the WASM.**
+    /// See [`ActionView::deploy_code_hash`].
+    DeployContract {
+        code: String, // base64 of the 32-byte code hash (NOT the WASM)
+    },
+    FunctionCall {
+        method_name: String,
+        args: String, // base64
+        gas: Gas,
+        deposit: NearToken,
+    },
+    Transfer {
+        deposit: NearToken,
+    },
+    Stake {
+        stake: NearToken,
+        public_key: PublicKey,
+    },
+    AddKey {
+        public_key: PublicKey,
+        access_key: AccessKeyDetails,
+    },
+    DeleteKey {
+        public_key: PublicKey,
+    },
+    DeleteAccount {
+        beneficiary_id: AccountId,
+    },
+    Delegate {
+        delegate_action: DelegateActionView,
+        signature: Signature,
+    },
+    DelegateV2 {
+        delegate_action: VersionedDelegateActionPayloadView,
+        signature: Signature,
+    },
+    /// Publish a global contract, identified by its code hash.
+    ///
+    /// **`code` is the base64 of the 32-byte SHA-256 code hash, not the WASM.**
+    /// See [`ActionView::deploy_code_hash`].
+    #[serde(rename = "DeployGlobalContract")]
+    DeployGlobalContract {
+        code: String, // base64 of the 32-byte code hash (NOT the WASM)
+    },
+    /// Publish a global contract, identified by the publisher's account ID.
+    ///
+    /// **`code` is the base64 of the 32-byte SHA-256 code hash, not the WASM.**
+    /// See [`ActionView::deploy_code_hash`].
+    #[serde(rename = "DeployGlobalContractByAccountId")]
+    DeployGlobalContractByAccountId {
+        code: String, // base64 of the 32-byte code hash (NOT the WASM)
+    },
+    #[serde(rename = "UseGlobalContract")]
+    UseGlobalContract {
+        code_hash: CryptoHash,
+    },
+    #[serde(rename = "UseGlobalContractByAccountId")]
+    UseGlobalContractByAccountId {
+        account_id: AccountId,
+    },
+    #[serde(rename = "DeterministicStateInit")]
+    DeterministicStateInit {
+        code: GlobalContractIdentifierView,
+        #[serde(default)]
+        data: BTreeMap<String, String>,
+        deposit: NearToken,
+    },
+    TransferToGasKey {
+        public_key: PublicKey,
+        deposit: NearToken,
+    },
+    WithdrawFromGasKey {
+        public_key: PublicKey,
+        amount: NearToken,
+    },
+}
+
+// ============================================================================
+// View -> wire conversions (ActionView -> Action, AccessKey*View -> AccessKey)
+// ============================================================================
+
+impl From<AccessKeyPermissionView> for AccessKeyPermission {
+    fn from(view: AccessKeyPermissionView) -> Self {
+        match view {
+            AccessKeyPermissionView::FullAccess => Self::FullAccess,
+            AccessKeyPermissionView::FunctionCall {
+                allowance,
+                receiver_id,
+                method_names,
+            } => Self::FunctionCall(FunctionCallPermission {
+                allowance,
+                receiver_id,
+                method_names,
+            }),
+            AccessKeyPermissionView::GasKeyFunctionCall {
+                balance,
+                num_nonces,
+                allowance,
+                receiver_id,
+                method_names,
+            } => Self::GasKeyFunctionCall(
+                GasKeyInfo {
+                    balance,
+                    num_nonces,
+                },
+                FunctionCallPermission {
+                    allowance,
+                    receiver_id,
+                    method_names,
+                },
+            ),
+            AccessKeyPermissionView::GasKeyFullAccess {
+                balance,
+                num_nonces,
+            } => Self::GasKeyFullAccess(GasKeyInfo {
+                balance,
+                num_nonces,
+            }),
+        }
+    }
+}
+
+impl From<AccessKeyDetails> for AccessKey {
+    fn from(view: AccessKeyDetails) -> Self {
+        Self {
+            nonce: view.nonce,
+            permission: view.permission.into(),
+        }
+    }
+}
+
+/// Drops the block metadata (`block_height` / `block_hash`) and keeps the
+/// nonce and permission.
+impl From<AccessKeyView> for AccessKey {
+    fn from(view: AccessKeyView) -> Self {
+        Self {
+            nonce: view.nonce,
+            permission: view.permission.into(),
+        }
+    }
+}
+
+impl From<GlobalContractIdentifierView> for GlobalContractId {
+    fn from(view: GlobalContractIdentifierView) -> Self {
+        match view {
+            GlobalContractIdentifierView::CodeHash(hash) => Self::CodeHash(*hash.as_bytes()),
+            GlobalContractIdentifierView::AccountId(account_id) => Self::AccountId(account_id),
+        }
+    }
+}
+
+impl From<TransactionNonceView> for TransactionNonce {
+    fn from(view: TransactionNonceView) -> Self {
+        match view {
+            TransactionNonceView::Nonce { nonce } => Self::from_nonce(nonce),
+            TransactionNonceView::GasKeyNonce { nonce, nonce_index } => {
+                Self::from_nonce_and_index(nonce, nonce_index)
+            }
+        }
+    }
+}
+
+impl ActionView {
+    /// The code hash carried by a `DeployContract` / `DeployGlobalContract` /
+    /// `DeployGlobalContractByAccountId` view; `None` for every other variant.
+    ///
+    /// The node does not serve the WASM in these views: the `code` field is the
+    /// base64 of the 32-byte SHA-256 hash of the code (see the
+    /// [enum-level note](ActionView#deploy-views-carry-the-code-hash-not-the-wasm)).
+    /// This accessor decodes it into a [`CryptoHash`], failing if `code` is not
+    /// valid base64 or does not decode to exactly 32 bytes.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use near_kit::CryptoHash;
+    /// use near_kit::rpc::ActionView;
+    ///
+    /// // `code` is base64(sha256(wasm)); here the WASM is the empty byte string.
+    /// let view: ActionView = serde_json::from_value(serde_json::json!({
+    ///     "DeployContract": { "code": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" }
+    /// }))?;
+    ///
+    /// let hash = view.deploy_code_hash().expect("a deploy view")?;
+    /// assert_eq!(hash, CryptoHash::hash(b""));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn deploy_code_hash(&self) -> Option<Result<CryptoHash, ActionViewConversionError>> {
+        match self {
+            Self::DeployContract { code }
+            | Self::DeployGlobalContract { code }
+            | Self::DeployGlobalContractByAccountId { code } => Some(decode_code_hash(code)),
+            _ => None,
+        }
+    }
+}
+
+/// Decode a base64 view field, naming the field in the error.
+fn decode_view_base64(field: &'static str, s: &str) -> Result<Vec<u8>, ActionViewConversionError> {
+    STANDARD
+        .decode(s)
+        .map_err(|source| ActionViewConversionError::InvalidBase64 { field, source })
+}
+
+/// Decode the `code` field of a deploy view into the 32-byte code hash it holds.
+fn decode_code_hash(code: &str) -> Result<CryptoHash, ActionViewConversionError> {
+    let bytes = decode_view_base64("code", code)?;
+    CryptoHash::try_from(bytes.as_slice()).map_err(|_| ActionViewConversionError::InvalidCodeHash {
+        actual: bytes.len(),
+    })
+}
+
+/// Convert the inner actions of a delegate view, rejecting nested delegates.
+fn non_delegate_actions(
+    views: Vec<ActionView>,
+) -> Result<Vec<NonDelegateAction>, ActionViewConversionError> {
+    views.into_iter().map(NonDelegateAction::try_from).collect()
+}
+
+impl TryFrom<DelegateActionView> for DelegateAction {
+    type Error = ActionViewConversionError;
+
+    fn try_from(view: DelegateActionView) -> Result<Self, Self::Error> {
+        Ok(Self {
+            sender_id: view.sender_id,
+            receiver_id: view.receiver_id,
+            actions: non_delegate_actions(view.actions)?,
+            nonce: view.nonce,
+            max_block_height: view.max_block_height,
+            public_key: view.public_key,
+        })
+    }
+}
+
+impl TryFrom<DelegateActionV2View> for DelegateActionV2 {
+    type Error = ActionViewConversionError;
+
+    fn try_from(view: DelegateActionV2View) -> Result<Self, Self::Error> {
+        Ok(Self {
+            sender_id: view.sender_id,
+            receiver_id: view.receiver_id,
+            actions: non_delegate_actions(view.actions)?,
+            nonce: view.nonce.into(),
+            max_block_height: view.max_block_height,
+            public_key: view.public_key,
+        })
+    }
+}
+
+impl TryFrom<VersionedDelegateActionPayloadView> for VersionedDelegateActionPayload {
+    type Error = ActionViewConversionError;
+
+    fn try_from(view: VersionedDelegateActionPayloadView) -> Result<Self, Self::Error> {
+        match view {
+            VersionedDelegateActionPayloadView::V2(d) => Ok(Self::V2(d.try_into()?)),
+        }
+    }
+}
+
+/// Convert a node-reported action view back into a wire [`Action`], e.g. to
+/// re-sign or replay a transaction fetched with `tx_status`.
+///
+/// # Deploy actions come back with the code *hash* in `code`
+///
+/// `DeployContract`, `DeployGlobalContract` and `DeployGlobalContractByAccountId`
+/// views carry the base64 of the 32-byte SHA-256 code hash, **not** the WASM
+/// (see [`ActionView`]). Converting any of these views therefore returns
+/// [`ActionViewConversionError::DeployCodeUnavailable`] instead of manufacturing
+/// a deploy action whose `code` is actually the hash. Use
+/// [`ActionView::deploy_code_hash`] to inspect the hash, then fetch the real code
+/// (for example with `view_code` on an archival node) and verify it separately.
+///
+/// # Other errors
+///
+/// * Invalid base64 in `args`, `code`, or state-init `data` →
+///   [`ActionViewConversionError::InvalidBase64`].
+/// * A delegate action nested inside a `Delegate` / `DelegateV2` view →
+///   [`ActionViewConversionError::NestedDelegate`].
+///
+/// # Example
+///
+/// The `transaction.actions` of a `tx_status` response, converted back to
+/// [`Action`]s (one action shown, deserialized from the JSON the node returns):
+///
+/// ```rust
+/// use near_kit::{Gas, NearToken};
+/// use near_kit::protocol::Action;
+/// use near_kit::rpc::ActionView;
+///
+/// let view: ActionView = serde_json::from_value(serde_json::json!({
+///     "FunctionCall": {
+///         "method_name": "set_greeting",
+///         "args": "eyJncmVldGluZyI6ImhpIn0=",
+///         "gas": 30000000000000u64,
+///         "deposit": "0"
+///     }
+/// }))?;
+///
+/// let action = Action::try_from(view)?;
+/// assert_eq!(
+///     action,
+///     Action::function_call(
+///         "set_greeting",
+///         br#"{"greeting":"hi"}"#.to_vec(),
+///         Gas::from_tgas(30),
+///         NearToken::from_yoctonear(0),
+///     )
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// With a live client (requires the `rpc` feature):
+///
+/// ```rust,ignore
+/// let outcome = near.tx_status(&tx_hash, "alice.near").wait_until::<Final>().await?;
+/// let actions = outcome
+///     .transaction
+///     .actions
+///     .into_iter()
+///     .map(Action::try_from)
+///     .collect::<Result<Vec<_>, _>>()?;
+/// ```
+impl TryFrom<ActionView> for Action {
+    type Error = ActionViewConversionError;
+
+    fn try_from(view: ActionView) -> Result<Self, Self::Error> {
+        Ok(match view {
+            ActionView::CreateAccount => Self::CreateAccount(CreateAccountAction),
+            ActionView::DeployContract { code }
+            | ActionView::DeployGlobalContract { code }
+            | ActionView::DeployGlobalContractByAccountId { code } => {
+                return Err(ActionViewConversionError::DeployCodeUnavailable {
+                    code_hash: decode_code_hash(&code)?,
+                });
+            }
+            ActionView::FunctionCall {
+                method_name,
+                args,
+                gas,
+                deposit,
+            } => Self::FunctionCall(FunctionCallAction {
+                method_name,
+                args: decode_view_base64("args", &args)?,
+                gas,
+                deposit,
+            }),
+            ActionView::Transfer { deposit } => Self::Transfer(TransferAction { deposit }),
+            ActionView::Stake { stake, public_key } => {
+                Self::Stake(StakeAction { stake, public_key })
+            }
+            ActionView::AddKey {
+                public_key,
+                access_key,
+            } => Self::AddKey(AddKeyAction {
+                public_key,
+                access_key: access_key.into(),
+            }),
+            ActionView::DeleteKey { public_key } => Self::DeleteKey(DeleteKeyAction { public_key }),
+            ActionView::DeleteAccount { beneficiary_id } => {
+                Self::DeleteAccount(DeleteAccountAction { beneficiary_id })
+            }
+            ActionView::Delegate {
+                delegate_action,
+                signature,
+            } => Self::Delegate(Box::new(SignedDelegateAction {
+                delegate_action: delegate_action.try_into()?,
+                signature,
+            })),
+            ActionView::DelegateV2 {
+                delegate_action,
+                signature,
+            } => Self::DelegateV2(Box::new(VersionedSignedDelegateAction {
+                delegate_action: delegate_action.try_into()?,
+                signature,
+            })),
+            ActionView::UseGlobalContract { code_hash } => {
+                Self::UseGlobalContract(UseGlobalContractAction {
+                    contract_identifier: GlobalContractId::CodeHash(*code_hash.as_bytes()),
+                })
+            }
+            ActionView::UseGlobalContractByAccountId { account_id } => {
+                Self::UseGlobalContract(UseGlobalContractAction {
+                    contract_identifier: GlobalContractId::AccountId(account_id),
+                })
+            }
+            ActionView::DeterministicStateInit {
+                code,
+                data,
+                deposit,
+            } => {
+                let data = data
+                    .into_iter()
+                    .map(|(k, v)| {
+                        Ok((
+                            decode_view_base64("data", &k)?,
+                            decode_view_base64("data", &v)?,
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, ActionViewConversionError>>()?;
+                Self::DeterministicStateInit(DeterministicStateInitAction {
+                    state_init: StateInit::V1(StateInitV1 {
+                        code: code.into(),
+                        data,
+                    }),
+                    deposit,
+                })
+            }
+            ActionView::TransferToGasKey {
+                public_key,
+                deposit,
+            } => Self::TransferToGasKey(TransferToGasKeyAction {
+                public_key,
+                deposit,
+            }),
+            ActionView::WithdrawFromGasKey { public_key, amount } => {
+                Self::WithdrawFromGasKey(WithdrawFromGasKeyAction { public_key, amount })
+            }
+        })
+    }
+}
+
+/// Like [`TryFrom<ActionView> for Action`](Action#impl-TryFrom<ActionView>-for-Action),
+/// additionally rejecting `Delegate` / `DelegateV2` views with
+/// [`ActionViewConversionError::NestedDelegate`].
+impl TryFrom<ActionView> for NonDelegateAction {
+    type Error = ActionViewConversionError;
+
+    fn try_from(view: ActionView) -> Result<Self, Self::Error> {
+        Self::from_action(Action::try_from(view)?).ok_or(ActionViewConversionError::NestedDelegate)
+    }
+}
+
+/// Merkle path item for cryptographic proofs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MerklePathItem {
+    /// Hash at this node.
+    pub hash: CryptoHash,
+    /// Direction of the path.
+    pub direction: MerkleDirection,
+}
+
+/// Direction in merkle path.
+#[derive(Debug, Clone, Deserialize)]
+pub enum MerkleDirection {
+    Left,
+    Right,
+}
+
+/// Execution outcome with ID.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionOutcomeWithId {
+    /// Receipt or transaction ID.
+    pub id: CryptoHash,
+    /// Outcome details.
+    pub outcome: ExecutionOutcome,
+    /// Proof of execution.
+    #[serde(default)]
+    pub proof: Vec<MerklePathItem>,
+    /// Block hash where this was executed.
+    pub block_hash: CryptoHash,
+}
+
+/// Execution outcome details.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionOutcome {
+    /// Executor account.
+    pub executor_id: AccountId,
+    /// Gas burnt during execution.
+    pub gas_burnt: Gas,
+    /// Tokens burnt for gas.
+    pub tokens_burnt: NearToken,
+    /// Logs emitted.
+    pub logs: Vec<String>,
+    /// Receipt IDs generated.
+    pub receipt_ids: Vec<CryptoHash>,
+    /// Execution status.
+    pub status: ExecutionStatus,
+    /// Execution metadata (gas profiling).
+    #[serde(default)]
+    pub metadata: Option<ExecutionMetadata>,
+}
+
+/// Execution metadata with gas profiling.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionMetadata {
+    /// Metadata version (V1=1, V2=2, V3=3, V4=4).
+    pub version: u32,
+    /// Gas profile entries.
+    #[serde(default)]
+    pub gas_profile: Option<Vec<GasProfileEntry>>,
+    /// The contract attached to the receiver account immediately before each
+    /// action in the receipt ran — one entry per action, in order
+    /// (`ExecutionMetadata` V4+, protocol 2.13).
+    ///
+    /// The inner `Option` is `None` (JSON `null`) when the account had no
+    /// contract at that point (no code, or it did not yet exist). The outer
+    /// `Option` is `None` when the field is absent (older V1–V3 metadata) or
+    /// explicitly `null`. Note this is *wire-format* back-compatibility: adding
+    /// this public field is itself a (minor) Rust API change for code that
+    /// constructs/destructures `ExecutionMetadata`.
+    #[serde(default)]
+    pub contracts: Option<Vec<Option<AccountContractView>>>,
+}
+
+/// The contract attached to an account, as reported per-action in
+/// [`ExecutionMetadata::contracts`] (V4+).
+///
+/// A receipt action with no contract is represented as `None` in the
+/// surrounding `Option`, so this enum only covers the cases where a contract
+/// was present.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountContractView {
+    /// A regular contract deployed to the account, identified by its code hash.
+    Local(CryptoHash),
+    /// A global contract referenced by its code hash.
+    GlobalHash(CryptoHash),
+    /// A global contract referenced by the account that deployed it.
+    GlobalAccountId(AccountId),
+}
+
+/// Gas profile entry for detailed gas accounting.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GasProfileEntry {
+    /// Cost category (ACTION_COST or WASM_HOST_COST).
+    pub cost_category: String,
+    /// Cost name.
+    pub cost: String,
+    /// Gas used for this cost.
+    #[serde(deserialize_with = "gas_dec_format")]
+    pub gas_used: Gas,
+}
+
+/// A view function result and metadata from the same successful RPC response.
+///
+/// The default payload is raw bytes. Typed views using `with_metadata().await`
+/// return this same structure with a decoded payload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ViewFunctionResult<T = Vec<u8>> {
+    /// Raw return bytes or the decoded contract return value.
+    pub result: T,
+    /// Logs emitted during view call.
+    pub logs: Vec<String>,
+    /// Block height of the query.
+    pub block_height: u64,
+    /// Block hash of the query.
+    pub block_hash: CryptoHash,
+}
+
+impl ViewFunctionResult {
+    /// Get the result as raw bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.result
+    }
+
+    /// Get the result as a string.
+    pub fn as_string(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.result.clone())
+    }
+
+    /// Deserialize the result as JSON.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let result = rpc.view_function(&contract, "get_data", &[], block).await?;
+    /// let data: MyData = result.json()?;
+    /// ```
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        // NEAR returns zero bytes for `()`-returning (void) methods; map empty -> null so
+        // `()` and `Option<T>` deserialize instead of failing with "EOF while parsing a value".
+        let bytes: &[u8] = if self.result.is_empty() {
+            b"null"
+        } else {
+            &self.result
+        };
+        serde_json::from_slice(bytes)
+    }
+
+    /// Deserialize the result as Borsh.
+    ///
+    /// Use this for contracts that return Borsh-encoded data instead of JSON.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let result = rpc.view_function(&contract, "get_state", &args, block).await?;
+    /// let state: ContractState = result.borsh()?;
+    /// ```
+    pub fn borsh<T: borsh::BorshDeserialize>(&self) -> Result<T, borsh::io::Error> {
+        borsh::from_slice(&self.result)
+    }
+}
+
+// ============================================================================
+// Receipt types (for EXPERIMENTAL_tx_status)
+// ============================================================================
+
+/// Receipt from EXPERIMENTAL_tx_status.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Receipt {
+    /// Predecessor account that created this receipt.
+    pub predecessor_id: AccountId,
+    /// Receiver account for this receipt.
+    pub receiver_id: AccountId,
+    /// Receipt ID.
+    pub receipt_id: CryptoHash,
+    /// Receipt content (action or data).
+    pub receipt: ReceiptContent,
+    /// Priority (optional, for congestion pricing).
+    #[serde(default)]
+    pub priority: Option<u64>,
+}
+
+/// Receipt content - action, data, or global contract distribution.
+#[derive(Debug, Clone, Deserialize)]
+pub enum ReceiptContent {
+    /// Action receipt.
+    Action(ActionReceiptData),
+    /// Data receipt.
+    Data(DataReceiptData),
+    /// Global contract distribution receipt.
+    GlobalContractDistribution {
+        /// Global contract identifier.
+        id: GlobalContractIdentifierView,
+        /// Target shard ID.
+        target_shard: u64,
+        /// Shards that have already received this contract.
+        #[serde(default)]
+        already_delivered_shards: Vec<u64>,
+        /// Code bytes (base64).
+        code: String,
+        /// Nonce (present in v2 receipts).
+        #[serde(default)]
+        nonce: Option<u64>,
+    },
+}
+
+/// Data receiver for output data in action receipts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DataReceiverView {
+    /// Data ID.
+    pub data_id: CryptoHash,
+    /// Receiver account ID.
+    pub receiver_id: AccountId,
+}
+
+/// Action receipt data.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionReceiptData {
+    /// Signer account ID.
+    pub signer_id: AccountId,
+    /// Signer public key.
+    pub signer_public_key: PublicKey,
+    /// Gas price for this receipt.
+    pub gas_price: NearToken,
+    /// Output data receivers.
+    #[serde(default)]
+    pub output_data_receivers: Vec<DataReceiverView>,
+    /// Input data IDs.
+    #[serde(default)]
+    pub input_data_ids: Vec<CryptoHash>,
+    /// Actions in this receipt.
+    pub actions: Vec<ActionView>,
+    /// Whether this is a promise yield.
+    #[serde(default)]
+    pub is_promise_yield: Option<bool>,
+}
+
+/// Data receipt data.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DataReceiptData {
+    /// Data ID.
+    pub data_id: CryptoHash,
+    /// Data content (optional).
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+// ============================================================================
+// Node status types
+// ============================================================================
+
+/// Node status response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatusResponse {
+    /// Protocol version.
+    pub protocol_version: u32,
+    /// Latest protocol version supported.
+    pub latest_protocol_version: u32,
+    /// Chain ID.
+    pub chain_id: String,
+    /// Genesis hash.
+    pub genesis_hash: CryptoHash,
+    /// RPC address.
+    #[serde(default)]
+    pub rpc_addr: Option<String>,
+    /// Node public key.
+    #[serde(default)]
+    pub node_public_key: Option<String>,
+    /// Node key (deprecated).
+    #[serde(default)]
+    pub node_key: Option<String>,
+    /// Validator account ID (if validating).
+    #[serde(default)]
+    pub validator_account_id: Option<AccountId>,
+    /// Validator public key (if validating).
+    #[serde(default)]
+    pub validator_public_key: Option<PublicKey>,
+    /// List of current validators.
+    #[serde(default)]
+    pub validators: Vec<ValidatorInfo>,
+    /// Sync information.
+    pub sync_info: SyncInfo,
+    /// Node version.
+    pub version: NodeVersion,
+    /// Uptime in seconds.
+    #[serde(default)]
+    pub uptime_sec: Option<u64>,
+}
+
+/// Validator information.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValidatorInfo {
+    /// Validator account ID.
+    pub account_id: AccountId,
+}
+
+/// Sync information.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncInfo {
+    /// Latest block hash.
+    pub latest_block_hash: CryptoHash,
+    /// Latest block height.
+    pub latest_block_height: u64,
+    /// Latest state root.
+    #[serde(default)]
+    pub latest_state_root: Option<CryptoHash>,
+    /// Latest block timestamp.
+    pub latest_block_time: String,
+    /// Whether the node is syncing.
+    pub syncing: bool,
+    /// Earliest block hash (if available).
+    #[serde(default)]
+    pub earliest_block_hash: Option<CryptoHash>,
+    /// Earliest block height (if available).
+    #[serde(default)]
+    pub earliest_block_height: Option<u64>,
+    /// Earliest block time (if available).
+    #[serde(default)]
+    pub earliest_block_time: Option<String>,
+    /// Current epoch ID.
+    #[serde(default)]
+    pub epoch_id: Option<CryptoHash>,
+    /// Epoch start height.
+    #[serde(default)]
+    pub epoch_start_height: Option<u64>,
+}
+
+/// Node version information.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NodeVersion {
+    /// Version string.
+    pub version: String,
+    /// Build string.
+    pub build: String,
+    /// Git commit hash.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Rust compiler version.
+    #[serde(default)]
+    pub rustc_version: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{AccessKeyPermission, MAX_NONCES_FOR_GAS_KEY};
+    use crate::signer::KeyType;
+
+    #[test]
+    fn test_access_key_list_parses_ml_dsa65_hash_handle() {
+        // A 2.13 node returns ML-DSA-65 access keys as a 32-byte `ml-dsa-65-hash:`
+        // handle (the full pubkey is not stored on-trie). View parsing must
+        // accept it without panicking — in the key list and as the `last_key`
+        // pagination cursor, which is the same handle type.
+        let handle = format!("ml-dsa-65-hash:{}", bs58::encode([3u8; 32]).into_string());
+        let json = serde_json::json!({
+            "keys": [
+                {
+                    "public_key": handle,
+                    "access_key": { "nonce": 1u64, "permission": "FullAccess" }
+                },
+                {
+                    "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                    "access_key": { "nonce": 2u64, "permission": "FullAccess" }
+                }
+            ],
+            "last_key": handle,
+            "block_height": 42u64,
+            "block_hash": "11111111111111111111111111111111"
+        });
+
+        let list: AccessKeyListView = serde_json::from_value(json).unwrap();
+        assert_eq!(list.keys.len(), 2);
+        assert!(list.keys[0].public_key.is_ml_dsa65_hash());
+        assert!(list.keys[0].public_key.full_pubkey().is_none());
+        assert_eq!(list.keys[0].public_key.key_type(), KeyType::MlDsa65);
+        assert_eq!(list.keys[0].public_key.to_string(), handle);
+        // The ed25519 entry is a full, usable key.
+        let ed = list.keys[1].public_key.full_pubkey().unwrap();
+        assert_eq!(ed.key_type(), KeyType::Ed25519);
+        assert_eq!(
+            ed.to_string(),
+            "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+        );
+        // The cursor round-trips to the exact wire string, so it can be sent
+        // back verbatim as `after_key`.
+        let last_key = list.last_key.expect("last_key present");
+        assert_eq!(last_key, list.keys[0].public_key);
+        assert_eq!(last_key.to_string(), handle);
+    }
+
+    #[test]
+    fn test_access_key_list_without_last_key_is_final_page() {
+        // Pre-pagination nodes (and the last page of a paginated listing) omit
+        // `last_key` entirely.
+        let json = serde_json::json!({
+            "keys": [],
+            "block_height": 42u64,
+            "block_hash": "11111111111111111111111111111111"
+        });
+        let list: AccessKeyListView = serde_json::from_value(json).unwrap();
+        assert!(list.keys.is_empty());
+        assert_eq!(list.last_key, None);
+    }
+
+    #[test]
+    fn test_gas_key_nonces_view_deserialization() {
+        let json = serde_json::json!({
+            "nonces": [7, 11, 42],
+            "block_height": 12345,
+            "block_hash": "11111111111111111111111111111111"
+        });
+
+        let view: GasKeyNoncesView = serde_json::from_value(json).unwrap();
+        assert_eq!(view.nonces, vec![7, 11, 42]);
+        assert_eq!(view.block_height, 12345);
+        assert_eq!(
+            view.block_hash,
+            "11111111111111111111111111111111".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_view_state_result_deserializes_with_cursor() {
+        // `key`/`value`/`last_key` are base64 on the wire.
+        let json = serde_json::json!({
+            "values": [
+                { "key": STANDARD.encode(b"STATE"), "value": STANDARD.encode(b"v1") },
+                { "key": STANDARD.encode(b"k2"), "value": STANDARD.encode([0u8, 1, 2]) }
+            ],
+            "last_key": STANDARD.encode(b"k2"),
+            "block_height": 12345,
+            "block_hash": "11111111111111111111111111111111"
+        });
+        let result: ViewStateResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.values.len(), 2);
+        assert_eq!(result.values[0].key, b"STATE");
+        assert_eq!(result.values[0].value, b"v1");
+        assert_eq!(result.values[1].value, vec![0u8, 1, 2]);
+        assert_eq!(result.last_key.as_deref(), Some(b"k2".as_slice()));
+        assert_eq!(result.block_height, 12345);
+        assert_eq!(
+            result.block_hash,
+            "11111111111111111111111111111111".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_view_state_result_last_page_has_no_cursor() {
+        // The final page omits `last_key`.
+        let json = serde_json::json!({
+            "values": [{ "key": STANDARD.encode(b"k"), "value": STANDARD.encode(b"v") }],
+            "block_height": 12345,
+            "block_hash": "11111111111111111111111111111111"
+        });
+        let result: ViewStateResult = serde_json::from_value(json).unwrap();
+        assert_eq!(result.values.len(), 1);
+        assert!(result.last_key.is_none());
+    }
+
+    #[test]
+    fn test_execution_metadata_v4_contracts_parsed() {
+        // Captured from a 2.13 node: V4 metadata with one contract per action.
+        let json = serde_json::json!({
+            "version": 4,
+            "gas_profile": [],
+            "contracts": [
+                null,
+                { "local": "11111111111111111111111111111111" },
+                { "global_hash": "11111111111111111111111111111111" },
+                { "global_account_id": "contract.near" }
+            ]
+        });
+        let meta: ExecutionMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.version, 4);
+        let contracts = meta.contracts.expect("V4 carries contracts");
+        assert_eq!(contracts.len(), 4);
+        assert!(contracts[0].is_none());
+        assert!(matches!(contracts[1], Some(AccountContractView::Local(_))));
+        assert!(matches!(
+            contracts[2],
+            Some(AccountContractView::GlobalHash(_))
+        ));
+        match &contracts[3] {
+            Some(AccountContractView::GlobalAccountId(id)) => {
+                assert_eq!(id.as_str(), "contract.near")
+            }
+            other => panic!("expected global_account_id, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execution_metadata_v3_has_no_contracts() {
+        // V1-V3 omit `contracts`; parsing must stay backward-compatible.
+        let json = serde_json::json!({
+            "version": 3,
+            "gas_profile": [
+                { "cost_category": "WASM_HOST_COST", "cost": "BASE", "gas_used": "100" }
+            ]
+        });
+        let meta: ExecutionMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.version, 3);
+        assert!(meta.contracts.is_none());
+        assert_eq!(meta.gas_profile.as_ref().unwrap().len(), 1);
+    }
+
+    fn make_account_view(amount: u128, locked: u128, storage_usage: u64) -> AccountView {
+        AccountView {
+            amount: NearToken::from_yoctonear(amount),
+            locked: NearToken::from_yoctonear(locked),
+            code_hash: CryptoHash::default(),
+            storage_usage,
+            storage_paid_at: 0,
+            global_contract_hash: None,
+            global_contract_account_id: None,
+            block_height: 0,
+            block_hash: CryptoHash::default(),
+        }
+    }
+
+    #[test]
+    fn test_available_balance_no_stake_no_storage() {
+        // No storage, no stake -> all balance is available
+        let view = make_account_view(1_000_000_000_000_000_000_000_000, 0, 0); // 1 NEAR
+        assert_eq!(view.available(), view.amount);
+    }
+
+    #[test]
+    fn test_available_balance_with_storage_no_stake() {
+        // 1000 bytes storage (= 0.00001 NEAR * 1000 = 0.01 NEAR = 10^22 yocto)
+        // Amount: 1 NEAR = 10^24 yocto
+        // Available should be: 1 NEAR - 0.01 NEAR = 0.99 NEAR
+        let amount = 1_000_000_000_000_000_000_000_000u128; // 1 NEAR
+        let storage_usage = 1000u64;
+        let storage_cost = STORAGE_AMOUNT_PER_BYTE * storage_usage as u128; // 10^22
+
+        let view = make_account_view(amount, 0, storage_usage);
+        let expected = NearToken::from_yoctonear(amount - storage_cost);
+        assert_eq!(view.available(), expected);
+    }
+
+    #[test]
+    fn test_available_balance_stake_covers_storage() {
+        // Staked amount >= storage cost -> all liquid balance is available
+        // 1000 bytes storage = 10^22 yocto cost
+        // 1 NEAR staked = 10^24 yocto (more than storage cost)
+        let amount = 1_000_000_000_000_000_000_000_000u128; // 1 NEAR liquid
+        let locked = 1_000_000_000_000_000_000_000_000u128; // 1 NEAR staked
+        let storage_usage = 1000u64;
+
+        let view = make_account_view(amount, locked, storage_usage);
+        // All liquid balance should be available since stake covers storage
+        assert_eq!(view.available(), view.amount);
+    }
+
+    #[test]
+    fn test_available_balance_stake_partially_covers_storage() {
+        // Staked = 0.005 NEAR = 5 * 10^21 yocto
+        // Storage = 1000 bytes = 0.01 NEAR = 10^22 yocto
+        // Reserved = 0.01 - 0.005 = 0.005 NEAR = 5 * 10^21 yocto
+        // Amount = 1 NEAR
+        // Available = 1 NEAR - 0.005 NEAR = 0.995 NEAR
+        let amount = 1_000_000_000_000_000_000_000_000u128; // 1 NEAR
+        let locked = 5_000_000_000_000_000_000_000u128; // 0.005 NEAR
+        let storage_usage = 1000u64;
+        let storage_cost = STORAGE_AMOUNT_PER_BYTE * storage_usage as u128; // 10^22
+        let reserved = storage_cost - locked; // 5 * 10^21
+
+        let view = make_account_view(amount, locked, storage_usage);
+        let expected = NearToken::from_yoctonear(amount - reserved);
+        assert_eq!(view.available(), expected);
+    }
+
+    #[test]
+    fn test_storage_cost_calculation() {
+        let storage_usage = 1000u64;
+        let view = make_account_view(1_000_000_000_000_000_000_000_000, 0, storage_usage);
+
+        let expected_cost = STORAGE_AMOUNT_PER_BYTE * storage_usage as u128;
+        assert_eq!(
+            view.storage_cost(),
+            NearToken::from_yoctonear(expected_cost)
+        );
+    }
+
+    #[test]
+    fn test_storage_cost_zero_when_stake_covers() {
+        // Staked > storage cost -> storage_cost returns 0
+        let locked = 1_000_000_000_000_000_000_000_000u128; // 1 NEAR
+        let view = make_account_view(1_000_000_000_000_000_000_000_000, locked, 1000);
+
+        assert_eq!(view.storage_cost(), NearToken::ZERO);
+    }
+
+    #[test]
+    fn test_account_balance_from_view() {
+        let amount = 1_000_000_000_000_000_000_000_000u128; // 1 NEAR
+        let locked = 500_000_000_000_000_000_000_000u128; // 0.5 NEAR
+        let storage_usage = 1000u64;
+
+        let view = make_account_view(amount, locked, storage_usage);
+        let balance = AccountBalance::from(view.clone());
+
+        assert_eq!(balance.total, view.amount);
+        assert_eq!(balance.available, view.available());
+        assert_eq!(balance.locked, view.locked);
+        assert_eq!(balance.storage_cost, view.storage_cost());
+        assert_eq!(balance.storage_usage, storage_usage);
+    }
+
+    // ========================================================================
+    // ViewFunctionResult tests
+    // ========================================================================
+
+    fn make_view_result(result: Vec<u8>) -> ViewFunctionResult {
+        ViewFunctionResult {
+            result,
+            logs: vec![],
+            block_height: 12345,
+            block_hash: CryptoHash::default(),
+        }
+    }
+
+    #[test]
+    fn test_view_function_result_bytes() {
+        let data = vec![1, 2, 3, 4, 5];
+        let result = make_view_result(data.clone());
+        assert_eq!(result.bytes(), &data[..]);
+    }
+
+    #[test]
+    fn test_view_function_result_as_string() {
+        let result = make_view_result(b"hello world".to_vec());
+        assert_eq!(result.as_string().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_view_function_result_json() {
+        let result = make_view_result(b"42".to_vec());
+        let value: u64 = result.json().unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn test_view_function_result_json_object() {
+        let result = make_view_result(b"{\"count\":123}".to_vec());
+        let value: serde_json::Value = result.json().unwrap();
+        assert_eq!(value["count"], 123);
+    }
+
+    #[test]
+    fn test_view_function_result_json_empty_unit() {
+        // Void view methods return zero bytes; empty should decode as `()`.
+        let result = make_view_result(vec![]);
+        let value: () = result.json().unwrap();
+        assert_eq!(value, ());
+    }
+
+    #[test]
+    fn test_view_function_result_json_empty_option_is_none() {
+        // Empty bytes map to JSON null, so `Option<T>` decodes to `None`.
+        let result = make_view_result(vec![]);
+        let value: Option<u64> = result.json().unwrap();
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn test_view_function_result_json_non_empty_option_is_some() {
+        // Non-empty payloads are unchanged: `42` decodes to both u64 and Some(42).
+        let result = make_view_result(b"42".to_vec());
+        let scalar: u64 = result.json().unwrap();
+        assert_eq!(scalar, 42);
+        let opt: Option<u64> = result.json().unwrap();
+        assert_eq!(opt, Some(42));
+    }
+
+    #[test]
+    fn test_view_function_result_borsh() {
+        // Borsh-encode a u64 value
+        let original: u64 = 42;
+        let encoded = borsh::to_vec(&original).unwrap();
+        let result = make_view_result(encoded);
+
+        let decoded: u64 = result.borsh().unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_view_function_result_borsh_struct() {
+        #[derive(borsh::BorshSerialize, borsh::BorshDeserialize, PartialEq, Debug)]
+        struct TestStruct {
+            value: u64,
+            name: String,
+        }
+
+        let original = TestStruct {
+            value: 123,
+            name: "test".to_string(),
+        };
+        let encoded = borsh::to_vec(&original).unwrap();
+        let result = make_view_result(encoded);
+
+        let decoded: TestStruct = result.borsh().unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_view_function_result_borsh_error() {
+        // Invalid Borsh data for a u64 (too short)
+        let result = make_view_result(vec![1, 2, 3]);
+        let decoded: Result<u64, _> = result.borsh();
+        assert!(decoded.is_err());
+    }
+
+    // ========================================================================
+    // GasProfileEntry tests
+    // ========================================================================
+
+    #[test]
+    fn test_gas_profile_entry_string_gas_used() {
+        let json = serde_json::json!({
+            "cost_category": "WASM_HOST_COST",
+            "cost": "BASE",
+            "gas_used": "123456789"
+        });
+        let entry: GasProfileEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.gas_used.as_gas(), 123456789);
+    }
+
+    #[test]
+    fn test_gas_profile_entry_numeric_gas_used() {
+        let json = serde_json::json!({
+            "cost_category": "ACTION_COST",
+            "cost": "FUNCTION_CALL",
+            "gas_used": 999000000
+        });
+        let entry: GasProfileEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.gas_used.as_gas(), 999000000);
+    }
+
+    #[test]
+    fn test_max_nonces_for_gas_key() {
+        assert_eq!(MAX_NONCES_FOR_GAS_KEY, 1024);
+        assert_eq!(
+            AccessKeyPermission::MAX_NONCES_FOR_GAS_KEY,
+            MAX_NONCES_FOR_GAS_KEY
+        );
+    }
+
+    #[test]
+    fn test_gas_key_function_call_deserialization() {
+        let json = serde_json::json!({
+            "GasKeyFunctionCall": {
+                "balance": "1000000000000000000000000",
+                "num_nonces": 5,
+                "allowance": "500000000000000000000000",
+                "receiver_id": "app.near",
+                "method_names": ["call_method"]
+            }
+        });
+        let perm: AccessKeyPermissionView = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            perm,
+            AccessKeyPermissionView::GasKeyFunctionCall { .. }
+        ));
+    }
+
+    #[test]
+    fn test_gas_key_full_access_deserialization() {
+        let json = serde_json::json!({
+            "GasKeyFullAccess": {
+                "balance": "1000000000000000000000000",
+                "num_nonces": 10
+            }
+        });
+        let perm: AccessKeyPermissionView = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            perm,
+            AccessKeyPermissionView::GasKeyFullAccess { .. }
+        ));
+    }
+
+    #[test]
+    fn test_transfer_to_gas_key_action_view_deserialization() {
+        let json = serde_json::json!({
+            "TransferToGasKey": {
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "deposit": "1000000000000000000000000"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        assert!(matches!(action, ActionView::TransferToGasKey { .. }));
+    }
+
+    #[test]
+    fn test_delegate_action_view_deserialization() {
+        let json = serde_json::json!({
+            "Delegate": {
+                "delegate_action": {
+                    "sender_id": "alice.near",
+                    "receiver_id": "contract.near",
+                    "actions": [
+                        {"FunctionCall": {
+                            "method_name": "do_something",
+                            "args": "e30=",
+                            "gas": 30000000000000_u64,
+                            "deposit": "0"
+                        }}
+                    ],
+                    "nonce": 42,
+                    "max_block_height": 100000,
+                    "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+                },
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        match action {
+            ActionView::Delegate {
+                delegate_action,
+                signature,
+            } => {
+                assert_eq!(delegate_action.sender_id.as_str(), "alice.near");
+                assert_eq!(delegate_action.receiver_id.as_str(), "contract.near");
+                assert_eq!(delegate_action.nonce, 42);
+                assert_eq!(delegate_action.max_block_height, 100000);
+                assert_eq!(delegate_action.actions.len(), 1);
+                assert!(signature.to_string().starts_with("ed25519:"));
+            }
+            _ => panic!("Expected Delegate action"),
+        }
+    }
+
+    #[test]
+    fn test_withdraw_from_gas_key_action_view_deserialization() {
+        let json = serde_json::json!({
+            "WithdrawFromGasKey": {
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "amount": "500000000000000000000000"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        assert!(matches!(action, ActionView::WithdrawFromGasKey { .. }));
+    }
+
+    #[test]
+    fn test_delegate_v2_action_view_deserialization() {
+        // Matches the node's JSON for Action::DelegateV2: an externally-tagged
+        // `{"V2": ..}` payload whose nonce is an externally-tagged gas-key nonce.
+        let json = serde_json::json!({
+            "DelegateV2": {
+                "delegate_action": {
+                    "V2": {
+                        "sender_id": "alice.near",
+                        "receiver_id": "contract.near",
+                        "actions": [
+                            { "Transfer": { "deposit": "1000000000000000000000000" } }
+                        ],
+                        "nonce": { "GasKeyNonce": { "nonce": 42, "nonce_index": 3 } },
+                        "max_block_height": 100000,
+                        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+                    }
+                },
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        match action {
+            ActionView::DelegateV2 {
+                delegate_action: VersionedDelegateActionPayloadView::V2(d),
+                signature,
+            } => {
+                assert_eq!(d.sender_id.as_str(), "alice.near");
+                assert_eq!(d.receiver_id.as_str(), "contract.near");
+                assert_eq!(d.max_block_height, 100000);
+                assert_eq!(d.actions.len(), 1);
+                assert_eq!(
+                    d.nonce,
+                    TransactionNonceView::GasKeyNonce {
+                        nonce: 42,
+                        nonce_index: 3
+                    }
+                );
+                assert!(signature.to_string().starts_with("ed25519:"));
+            }
+            other => panic!("Expected DelegateV2 action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delegate_v2_action_view_plain_nonce() {
+        // The V2 view must also accept an ordinary (non-gas-key) nonce.
+        let json = serde_json::json!({
+            "DelegateV2": {
+                "delegate_action": {
+                    "V2": {
+                        "sender_id": "alice.near",
+                        "receiver_id": "contract.near",
+                        "actions": [],
+                        "nonce": { "Nonce": { "nonce": 7 } },
+                        "max_block_height": 1,
+                        "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"
+                    }
+                },
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        let ActionView::DelegateV2 {
+            delegate_action: VersionedDelegateActionPayloadView::V2(d),
+            ..
+        } = action
+        else {
+            panic!("Expected DelegateV2 action");
+        };
+        assert_eq!(d.nonce, TransactionNonceView::Nonce { nonce: 7 });
+    }
+
+    // ========================================================================
+    // FinalExecutionStatus tests
+    // ========================================================================
+
+    #[test]
+    fn test_final_execution_status_default() {
+        let status = FinalExecutionStatus::default();
+        assert!(matches!(status, FinalExecutionStatus::NotStarted));
+    }
+
+    #[test]
+    fn test_final_execution_status_not_started() {
+        let json = serde_json::json!("NotStarted");
+        let status: FinalExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, FinalExecutionStatus::NotStarted));
+    }
+
+    #[test]
+    fn test_final_execution_status_started() {
+        let json = serde_json::json!("Started");
+        let status: FinalExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, FinalExecutionStatus::Started));
+    }
+
+    #[test]
+    fn test_final_execution_status_success_value() {
+        let json = serde_json::json!({"SuccessValue": "aGVsbG8="});
+        let status: FinalExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, FinalExecutionStatus::SuccessValue(ref s) if s == "aGVsbG8="));
+    }
+
+    #[test]
+    fn test_final_execution_status_failure() {
+        let json = serde_json::json!({
+            "Failure": {
+                "ActionError": {
+                    "index": 0,
+                    "kind": {
+                        "FunctionCallError": {
+                            "ExecutionError": "Smart contract panicked"
+                        }
+                    }
+                }
+            }
+        });
+        let status: FinalExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, FinalExecutionStatus::Failure(_)));
+    }
+
+    // ========================================================================
+    // FinalExecutionOutcome helper tests
+    // ========================================================================
+
+    #[test]
+    fn test_final_execution_outcome_logs_in_order() {
+        let outcome = |id: &str, logs: &[&str]| {
+            serde_json::json!({
+                "id": id,
+                "outcome": {
+                    "executor_id": "alice.near",
+                    "gas_burnt": 1,
+                    "tokens_burnt": "0",
+                    "logs": logs,
+                    "receipt_ids": [],
+                    "status": {"SuccessValue": ""}
+                },
+                "block_hash": "A6DJpKBhmAMmBuQXtY3dWbo8dGVSQ9yH7BQSJBfn8rBo",
+                "proof": []
+            })
+        };
+        let json = serde_json::json!({
+            "status": {"SuccessValue": ""},
+            "transaction": {
+                "signer_id": "alice.near",
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "nonce": 1,
+                "receiver_id": "bob.near",
+                "actions": [],
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5",
+                "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"
+            },
+            "transaction_outcome": outcome("9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U", &["tx"]),
+            "receipts_outcome": [
+                outcome("3GTGoiN3FEoJenSw5ob4YMmFEV2Fbiichj3FDBnM78xK", &["a", "b"]),
+                outcome("A6DJpKBhmAMmBuQXtY3dWbo8dGVSQ9yH7BQSJBfn8rBo", &[]),
+                outcome("9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U", &["c"]),
+            ]
+        });
+        let outcome: FinalExecutionOutcome = serde_json::from_value(json).unwrap();
+        assert_eq!(outcome.logs().collect::<Vec<_>>(), ["tx", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_send_tx_response_with_outcome() {
+        let json = serde_json::json!({
+            "final_execution_status": "FINAL",
+            "status": {"SuccessValue": ""},
+            "transaction": {
+                "signer_id": "alice.near",
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "nonce": 1,
+                "receiver_id": "bob.near",
+                "actions": [{"Transfer": {"deposit": "1000000000000000000000000"}}],
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5",
+                "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"
+            },
+            "transaction_outcome": {
+                "id": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+                "outcome": {
+                    "executor_id": "alice.near",
+                    "gas_burnt": 223182562500_i64,
+                    "tokens_burnt": "22318256250000000000",
+                    "logs": [],
+                    "receipt_ids": ["3GTGoiN3FEoJenSw5ob4YMmFEV2Fbiichj3FDBnM78xK"],
+                    "status": {"SuccessReceiptId": "3GTGoiN3FEoJenSw5ob4YMmFEV2Fbiichj3FDBnM78xK"}
+                },
+                "block_hash": "A6DJpKBhmAMmBuQXtY3dWbo8dGVSQ9yH7BQSJBfn8rBo",
+                "proof": []
+            },
+            "receipts_outcome": []
+        });
+        let response: RawTransactionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(response.final_execution_status, TxExecutionStatus::Final);
+        let outcome = response.outcome.unwrap();
+        assert!(outcome.is_success());
+        assert!(!outcome.is_failure());
+    }
+
+    #[test]
+    fn test_send_tx_response_pending_none() {
+        let json = serde_json::json!({
+            "final_execution_status": "NONE"
+        });
+        let response: RawTransactionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(response.final_execution_status, TxExecutionStatus::None);
+        assert!(response.outcome.is_none());
+        // transaction_hash is serde(skip) — populated by rpc methods, not deserialization
+        assert!(response.transaction_hash.is_zero());
+    }
+
+    #[test]
+    fn test_final_execution_outcome_failure() {
+        let json = serde_json::json!({
+            "final_execution_status": "EXECUTED_OPTIMISTIC",
+            "status": {
+                "Failure": {
+                    "ActionError": {
+                        "index": 0,
+                        "kind": {
+                            "FunctionCallError": {
+                                "ExecutionError": "Smart contract panicked"
+                            }
+                        }
+                    }
+                }
+            },
+            "transaction": {
+                "signer_id": "alice.near",
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "nonce": 1,
+                "receiver_id": "bob.near",
+                "actions": [],
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5",
+                "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"
+            },
+            "transaction_outcome": {
+                "id": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+                "outcome": {
+                    "executor_id": "alice.near",
+                    "gas_burnt": 0,
+                    "tokens_burnt": "0",
+                    "logs": [],
+                    "receipt_ids": [],
+                    "status": "Unknown"
+                },
+                "block_hash": "A6DJpKBhmAMmBuQXtY3dWbo8dGVSQ9yH7BQSJBfn8rBo",
+                "proof": []
+            },
+            "receipts_outcome": []
+        });
+        let response: RawTransactionResponse = serde_json::from_value(json).unwrap();
+        let outcome = response.outcome.unwrap();
+        assert!(outcome.is_failure());
+        assert!(!outcome.is_success());
+        assert!(outcome.failure_message().is_some());
+        assert!(outcome.failure_error().is_some());
+    }
+
+    // ========================================================================
+    // FinalExecutionOutcome result/json tests
+    // ========================================================================
+
+    fn make_success_outcome(base64_value: &str) -> FinalExecutionOutcome {
+        let json = serde_json::json!({
+            "final_execution_status": "FINAL",
+            "status": {"SuccessValue": base64_value},
+            "transaction": {
+                "signer_id": "alice.near",
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "nonce": 1,
+                "receiver_id": "bob.near",
+                "actions": [],
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5",
+                "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"
+            },
+            "transaction_outcome": {
+                "id": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+                "outcome": {
+                    "executor_id": "alice.near",
+                    "gas_burnt": 223182562500_i64,
+                    "tokens_burnt": "22318256250000000000",
+                    "logs": [],
+                    "receipt_ids": [],
+                    "status": {"SuccessReceiptId": "3GTGoiN3FEoJenSw5ob4YMmFEV2Fbiichj3FDBnM78xK"}
+                },
+                "block_hash": "A6DJpKBhmAMmBuQXtY3dWbo8dGVSQ9yH7BQSJBfn8rBo",
+                "proof": []
+            },
+            "receipts_outcome": []
+        });
+        let response: RawTransactionResponse = serde_json::from_value(json).unwrap();
+        response.outcome.unwrap()
+    }
+
+    #[test]
+    fn test_outcome_result() {
+        // "hello" in base64
+        let outcome = make_success_outcome("aGVsbG8=");
+        assert_eq!(outcome.result().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_outcome_result_empty() {
+        let outcome = make_success_outcome("");
+        assert_eq!(outcome.result().unwrap(), b"");
+    }
+
+    #[test]
+    fn test_outcome_json() {
+        // JSON `42` in base64
+        let outcome = make_success_outcome("NDI=");
+        let val: u64 = outcome.json().unwrap();
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn test_outcome_json_empty_unit() {
+        // Void change methods return an empty SuccessValue; empty should decode as `()`.
+        let outcome = make_success_outcome("");
+        let val: () = outcome.json().unwrap();
+        assert_eq!(val, ());
+    }
+
+    #[test]
+    fn test_outcome_json_empty_option_is_none() {
+        // Empty SuccessValue maps to JSON null, so `Option<T>` decodes to `None`.
+        let outcome = make_success_outcome("");
+        let val: Option<u64> = outcome.json().unwrap();
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn test_outcome_json_bad_data() {
+        // "hello" is not valid JSON
+        let outcome = make_success_outcome("aGVsbG8=");
+        let result: Result<u64, _> = outcome.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_outcome_result_invalid_base64_returns_err() {
+        // If the RPC somehow returns invalid base64 (protocol bug),
+        // result() returns an error so callers can distinguish it from empty values.
+        let outcome = make_success_outcome("not-valid-base64!!!");
+        let err = outcome.result().unwrap_err();
+        assert!(
+            err.to_string().contains("base64"),
+            "Error should mention base64 decode failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_outcome_failure_result_returns_err() {
+        let json = serde_json::json!({
+            "final_execution_status": "FINAL",
+            "status": {"Failure": {"ActionError": {"index": 0, "kind": {"FunctionCallError": {"ExecutionError": "test error"}}}}},
+            "transaction": {
+                "signer_id": "alice.near",
+                "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+                "nonce": 1,
+                "receiver_id": "bob.near",
+                "actions": [],
+                "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5",
+                "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"
+            },
+            "transaction_outcome": {
+                "id": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+                "outcome": {
+                    "executor_id": "alice.near",
+                    "gas_burnt": 223182562500_i64,
+                    "tokens_burnt": "22318256250000000000",
+                    "logs": [],
+                    "receipt_ids": [],
+                    "status": {"SuccessReceiptId": "3GTGoiN3FEoJenSw5ob4YMmFEV2Fbiichj3FDBnM78xK"}
+                },
+                "block_hash": "A6DJpKBhmAMmBuQXtY3dWbo8dGVSQ9yH7BQSJBfn8rBo",
+                "proof": []
+            },
+            "receipts_outcome": []
+        });
+        let outcome: FinalExecutionOutcome = serde_json::from_value(json).unwrap();
+
+        assert!(outcome.is_failure());
+        assert!(!outcome.is_success());
+        assert!(outcome.result().is_err());
+        assert!(outcome.json::<u64>().is_err());
+        // Metadata is still accessible
+        assert!(!outcome.transaction_hash().is_zero());
+        assert!(outcome.total_gas_used().as_gas() > 0);
+    }
+
+    // ========================================================================
+    // ExecutionStatus tests (per-receipt)
+    // ========================================================================
+
+    #[test]
+    fn test_execution_status_unknown() {
+        let json = serde_json::json!("Unknown");
+        let status: ExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, ExecutionStatus::Unknown));
+    }
+
+    #[test]
+    fn test_execution_status_success_value() {
+        let json = serde_json::json!({"SuccessValue": "aGVsbG8="});
+        let status: ExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, ExecutionStatus::SuccessValue(_)));
+    }
+
+    #[test]
+    fn test_execution_status_success_receipt_id() {
+        let json =
+            serde_json::json!({"SuccessReceiptId": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"});
+        let status: ExecutionStatus = serde_json::from_value(json).unwrap();
+        assert!(matches!(status, ExecutionStatus::SuccessReceiptId(_)));
+    }
+
+    #[test]
+    fn test_execution_status_failure_action_error() {
+        let json = serde_json::json!({
+            "Failure": {
+                "ActionError": {
+                    "index": 0,
+                    "kind": {
+                        "FunctionCallError": {
+                            "ExecutionError": "Smart contract panicked"
+                        }
+                    }
+                }
+            }
+        });
+        let status: ExecutionStatus = serde_json::from_value(json).unwrap();
+        match status {
+            ExecutionStatus::Failure(ae) => {
+                assert_eq!(ae.index, Some(0));
+            }
+            other => panic!("expected Failure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execution_status_accessors() {
+        let value: ExecutionStatus =
+            serde_json::from_value(serde_json::json!({"SuccessValue": "aGVsbG8="})).unwrap();
+        assert!(value.is_success() && !value.is_failure());
+        assert_eq!(value.success_value(), Some(&b"hello"[..]));
+        assert!(value.failure().is_none());
+
+        let receipt: ExecutionStatus = serde_json::from_value(
+            serde_json::json!({"SuccessReceiptId": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"}),
+        )
+        .unwrap();
+        assert!(receipt.is_success());
+        assert_eq!(receipt.success_value(), None);
+
+        let failure: ExecutionStatus = serde_json::from_value(serde_json::json!({
+            "Failure": {"ActionError": {"index": 0, "kind": {
+                "FunctionCallError": {"ExecutionError": "Smart contract panicked"}
+            }}}
+        }))
+        .unwrap();
+        assert!(failure.is_failure() && !failure.is_success());
+        assert_eq!(failure.failure().and_then(|e| e.index), Some(0));
+        assert_eq!(failure.success_value(), None);
+
+        assert!(!ExecutionStatus::Unknown.is_success());
+        assert!(!ExecutionStatus::Unknown.is_failure());
+    }
+
+    #[test]
+    fn test_execution_status_failure_invalid_tx_error_rejected() {
+        let json = serde_json::json!({
+            "Failure": {
+                "InvalidTxError": "InvalidSignature"
+            }
+        });
+        let err = serde_json::from_value::<ExecutionStatus>(json)
+            .expect_err("InvalidTxError should be rejected in receipt execution status");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected InvalidTxError"),
+            "Expected descriptive error containing \"unexpected InvalidTxError\", got: {msg}"
+        );
+    }
+
+    // ========================================================================
+    // GlobalContractIdentifierView tests
+    // ========================================================================
+
+    #[test]
+    fn test_global_contract_id_view_new_format_hash() {
+        let json = serde_json::json!({"hash": "9SP8Y3sVADWNN5QoEB5CsvPUE5HT4o8YfBaCnhLss87K"});
+        let id: GlobalContractIdentifierView = serde_json::from_value(json).unwrap();
+        assert!(matches!(id, GlobalContractIdentifierView::CodeHash(_)));
+    }
+
+    #[test]
+    fn test_global_contract_id_view_new_format_account() {
+        let json = serde_json::json!({"account_id": "alice.near"});
+        let id: GlobalContractIdentifierView = serde_json::from_value(json).unwrap();
+        assert!(matches!(id, GlobalContractIdentifierView::AccountId(_)));
+    }
+
+    #[test]
+    fn test_global_contract_id_view_deprecated_hash() {
+        let json = serde_json::json!("9SP8Y3sVADWNN5QoEB5CsvPUE5HT4o8YfBaCnhLss87K");
+        let id: GlobalContractIdentifierView = serde_json::from_value(json).unwrap();
+        assert!(matches!(id, GlobalContractIdentifierView::CodeHash(_)));
+    }
+
+    #[test]
+    fn test_global_contract_id_view_deprecated_account() {
+        let json = serde_json::json!("alice.near");
+        let id: GlobalContractIdentifierView = serde_json::from_value(json).unwrap();
+        assert!(matches!(id, GlobalContractIdentifierView::AccountId(_)));
+    }
+
+    // ========================================================================
+    // DeterministicStateInit ActionView tests
+    // ========================================================================
+
+    #[test]
+    fn test_action_view_deterministic_state_init() {
+        let json = serde_json::json!({
+            "DeterministicStateInit": {
+                "code": {"hash": "9SP8Y3sVADWNN5QoEB5CsvPUE5HT4o8YfBaCnhLss87K"},
+                "data": {"a2V5": "dmFsdWU="},
+                "deposit": "1000000000000000000000000"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        match action {
+            ActionView::DeterministicStateInit {
+                code,
+                data,
+                deposit,
+            } => {
+                assert!(matches!(code, GlobalContractIdentifierView::CodeHash(_)));
+                assert_eq!(data.len(), 1);
+                assert_eq!(data.get("a2V5").unwrap(), "dmFsdWU=");
+                assert_eq!(deposit, NearToken::from_near(1));
+            }
+            _ => panic!("Expected DeterministicStateInit"),
+        }
+    }
+
+    #[test]
+    fn test_action_view_deterministic_state_init_empty_data() {
+        let json = serde_json::json!({
+            "DeterministicStateInit": {
+                "code": {"account_id": "publisher.near"},
+                "deposit": "0"
+            }
+        });
+        let action: ActionView = serde_json::from_value(json).unwrap();
+        match action {
+            ActionView::DeterministicStateInit { code, data, .. } => {
+                assert!(matches!(code, GlobalContractIdentifierView::AccountId(_)));
+                assert!(data.is_empty());
+            }
+            _ => panic!("Expected DeterministicStateInit"),
+        }
+    }
+
+    // ========================================================================
+    // GlobalContractDistribution receipt tests
+    // ========================================================================
+
+    #[test]
+    fn test_receipt_global_contract_distribution() {
+        let json = serde_json::json!({
+            "GlobalContractDistribution": {
+                "id": {"hash": "9SP8Y3sVADWNN5QoEB5CsvPUE5HT4o8YfBaCnhLss87K"},
+                "target_shard": 3,
+                "already_delivered_shards": [0, 1, 2],
+                "code": "AGFzbQ==",
+                "nonce": 42
+            }
+        });
+        let content: ReceiptContent = serde_json::from_value(json).unwrap();
+        match content {
+            ReceiptContent::GlobalContractDistribution {
+                id,
+                target_shard,
+                already_delivered_shards,
+                code,
+                nonce,
+            } => {
+                assert!(matches!(id, GlobalContractIdentifierView::CodeHash(_)));
+                assert_eq!(target_shard, 3);
+                assert_eq!(already_delivered_shards, vec![0, 1, 2]);
+                assert_eq!(code, "AGFzbQ==");
+                assert_eq!(nonce, Some(42));
+            }
+            _ => panic!("Expected GlobalContractDistribution"),
+        }
+    }
+
+    #[test]
+    fn test_receipt_global_contract_distribution_without_nonce() {
+        let json = serde_json::json!({
+            "GlobalContractDistribution": {
+                "id": {"account_id": "publisher.near"},
+                "target_shard": 0,
+                "already_delivered_shards": [],
+                "code": "AGFzbQ=="
+            }
+        });
+        let content: ReceiptContent = serde_json::from_value(json).unwrap();
+        match content {
+            ReceiptContent::GlobalContractDistribution { nonce, .. } => {
+                assert_eq!(nonce, None);
+            }
+            _ => panic!("Expected GlobalContractDistribution"),
+        }
+    }
+
+    #[test]
+    fn test_gas_profile_entry_deserialization() {
+        let json = serde_json::json!({
+            "cost_category": "WASM_HOST_COST",
+            "cost": "BASE",
+            "gas_used": "2646228750"
+        });
+        let entry: GasProfileEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.cost_category, "WASM_HOST_COST");
+        assert_eq!(entry.cost, "BASE");
+        assert_eq!(entry.gas_used, Gas::from_gas(2646228750));
+    }
+
+    #[test]
+    fn test_transaction_view_with_signature() {
+        let json = serde_json::json!({
+            "signer_id": "alice.near",
+            "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+            "nonce": 1,
+            "receiver_id": "bob.near",
+            "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+            "actions": [{"Transfer": {"deposit": "1000000000000000000000000"}}],
+            "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5"
+        });
+        let tx: TransactionView = serde_json::from_value(json).unwrap();
+        assert_eq!(tx.signer_id.as_str(), "alice.near");
+        assert!(tx.signature.to_string().starts_with("ed25519:"));
+        // Fixture has no `nonce_mode` (older node); should deserialize to `None`.
+        assert_eq!(tx.nonce_mode, None);
+    }
+
+    #[test]
+    fn test_transaction_view_nonce_mode_strict() {
+        let json = serde_json::json!({
+            "signer_id": "alice.near",
+            "public_key": "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp",
+            "nonce": 1,
+            "receiver_id": "bob.near",
+            "hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+            "actions": [{"Transfer": {"deposit": "1000000000000000000000000"}}],
+            "signature": "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5",
+            "nonce_mode": "strict"
+        });
+        let tx: TransactionView = serde_json::from_value(json).unwrap();
+        assert_eq!(tx.nonce_mode, Some(NonceMode::Strict));
+    }
+
+    #[test]
+    fn test_receipt_to_tx_response() {
+        let json = serde_json::json!({
+            "transaction_hash": "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U",
+            "sender_account_id": "alice.near"
+        });
+        let response: ReceiptToTxResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            response.transaction_hash.to_string(),
+            "9FtHUFBQsZ2MG77K3x3MJ9wjX3UT8zE1TczCrhZEcG8U"
+        );
+        assert_eq!(response.sender_account_id.as_str(), "alice.near");
+    }
+}
+
+// Round-trips from the JSON the node returns for an `ActionView` back into the
+// wire `Action`. Kept in its own module so it stays a self-contained block.
+#[cfg(test)]
+mod action_view_conversion_tests {
+    use super::*;
+    use crate::types::StateInitExt as _;
+
+    const PK: &str = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp";
+    const SIG: &str = "ed25519:3s1dvMqNDCByoMnDnkhB4GPjTSXCRt4nt3Af5n1RX8W7aJ2FC6MfRf5BNXZ52EBifNJnNVBsGvke6GRYuaEYJXt5";
+
+    fn pk() -> PublicKey {
+        PK.parse().unwrap()
+    }
+
+    fn convert(json: serde_json::Value) -> Result<Action, ActionViewConversionError> {
+        let view: ActionView = serde_json::from_value(json).unwrap();
+        Action::try_from(view)
+    }
+
+    #[test]
+    fn function_call_decodes_base64_args() {
+        let expected = Action::function_call(
+            "set_greeting",
+            br#"{"greeting":"hi"}"#.to_vec(),
+            Gas::from_tgas(30),
+            NearToken::from_near(1),
+        );
+        let json = serde_json::json!({
+            "FunctionCall": {
+                "method_name": "set_greeting",
+                "args": STANDARD.encode(br#"{"greeting":"hi"}"#),
+                "gas": 30000000000000_u64,
+                "deposit": "1000000000000000000000000"
+            }
+        });
+        assert_eq!(convert(json).unwrap(), expected);
+    }
+
+    #[test]
+    fn function_call_rejects_invalid_base64_args() {
+        let json = serde_json::json!({
+            "FunctionCall": {
+                "method_name": "m",
+                "args": "not*base64",
+                "gas": 1_u64,
+                "deposit": "0"
+            }
+        });
+        assert!(matches!(
+            convert(json),
+            Err(ActionViewConversionError::InvalidBase64 { field: "args", .. })
+        ));
+    }
+
+    #[test]
+    fn simple_actions_round_trip() {
+        assert_eq!(
+            convert(serde_json::json!("CreateAccount")).unwrap(),
+            Action::create_account()
+        );
+        assert_eq!(
+            convert(serde_json::json!({ "Transfer": { "deposit": "5" } })).unwrap(),
+            Action::transfer(NearToken::from_yoctonear(5))
+        );
+        assert_eq!(
+            convert(serde_json::json!({ "Stake": { "stake": "7", "public_key": PK } })).unwrap(),
+            Action::stake(NearToken::from_yoctonear(7), pk())
+        );
+        assert_eq!(
+            convert(serde_json::json!({ "DeleteKey": { "public_key": PK } })).unwrap(),
+            Action::delete_key(pk())
+        );
+        assert_eq!(
+            convert(serde_json::json!({ "DeleteAccount": { "beneficiary_id": "bob.near" } }))
+                .unwrap(),
+            Action::delete_account("bob.near".parse().unwrap())
+        );
+        assert_eq!(
+            convert(serde_json::json!({
+                "TransferToGasKey": { "public_key": PK, "deposit": "3" }
+            }))
+            .unwrap(),
+            Action::transfer_to_gas_key(pk(), NearToken::from_yoctonear(3))
+        );
+        assert_eq!(
+            convert(serde_json::json!({
+                "WithdrawFromGasKey": { "public_key": PK, "amount": "4" }
+            }))
+            .unwrap(),
+            Action::withdraw_from_gas_key(pk(), NearToken::from_yoctonear(4))
+        );
+    }
+
+    #[test]
+    fn add_key_function_call_permission_round_trips() {
+        let json = serde_json::json!({
+            "AddKey": {
+                "public_key": PK,
+                "access_key": {
+                    "nonce": 9_u64,
+                    "permission": {
+                        "FunctionCall": {
+                            "allowance": "250000000000000000000000",
+                            "receiver_id": "contract.near",
+                            "method_names": ["a", "b"]
+                        }
+                    }
+                }
+            }
+        });
+        let expected = Action::AddKey(AddKeyAction {
+            public_key: pk(),
+            access_key: AccessKey {
+                nonce: 9,
+                permission: AccessKeyPermission::function_call(
+                    "contract.near".parse().unwrap(),
+                    vec!["a".into(), "b".into()],
+                    Some(NearToken::from_millinear(250)),
+                ),
+            },
+        });
+        assert_eq!(convert(json).unwrap(), expected);
+    }
+
+    #[test]
+    fn add_key_gas_key_permissions_round_trip() {
+        let json = serde_json::json!({
+            "AddKey": {
+                "public_key": PK,
+                "access_key": {
+                    "nonce": 0_u64,
+                    "permission": {
+                        "GasKeyFunctionCall": {
+                            "balance": "1000",
+                            "num_nonces": 8,
+                            "allowance": null,
+                            "receiver_id": "contract.near",
+                            "method_names": []
+                        }
+                    }
+                }
+            }
+        });
+        let expected = Action::AddKey(AddKeyAction {
+            public_key: pk(),
+            access_key: AccessKey {
+                nonce: 0,
+                permission: AccessKeyPermission::GasKeyFunctionCall(
+                    GasKeyInfo {
+                        balance: NearToken::from_yoctonear(1000),
+                        num_nonces: 8,
+                    },
+                    FunctionCallPermission {
+                        allowance: None,
+                        receiver_id: "contract.near".parse().unwrap(),
+                        method_names: vec![],
+                    },
+                ),
+            },
+        });
+        assert_eq!(convert(json).unwrap(), expected);
+
+        let full: AccessKeyPermission = serde_json::from_value::<AccessKeyPermissionView>(
+            serde_json::json!({ "GasKeyFullAccess": { "balance": "1", "num_nonces": 2 } }),
+        )
+        .unwrap()
+        .into();
+        assert_eq!(
+            full,
+            AccessKeyPermission::GasKeyFullAccess(GasKeyInfo {
+                balance: NearToken::from_yoctonear(1),
+                num_nonces: 2,
+            })
+        );
+        let full_access: AccessKeyPermission =
+            serde_json::from_value::<AccessKeyPermissionView>(serde_json::json!("FullAccess"))
+                .unwrap()
+                .into();
+        assert_eq!(full_access, AccessKeyPermission::FullAccess);
+    }
+
+    #[test]
+    fn access_key_view_drops_block_metadata() {
+        let view: AccessKeyView = serde_json::from_value(serde_json::json!({
+            "nonce": 5_u64,
+            "permission": "FullAccess",
+            "block_height": 1_u64,
+            "block_hash": "11111111111111111111111111111111"
+        }))
+        .unwrap();
+        assert_eq!(
+            AccessKey::from(view),
+            AccessKey {
+                nonce: 5,
+                permission: AccessKeyPermission::FullAccess
+            }
+        );
+    }
+
+    #[test]
+    fn deploy_views_expose_hash_but_cannot_convert_to_actions() {
+        let hash = CryptoHash::hash(b"contract code");
+        for tag in [
+            "DeployContract",
+            "DeployGlobalContract",
+            "DeployGlobalContractByAccountId",
+        ] {
+            let json = serde_json::json!({ tag: { "code": STANDARD.encode(hash) } });
+            let view: ActionView = serde_json::from_value(json).unwrap();
+            assert_eq!(view.deploy_code_hash().unwrap().unwrap(), hash);
+            let error = Action::try_from(view).unwrap_err();
+            assert_eq!(
+                error,
+                ActionViewConversionError::DeployCodeUnavailable { code_hash: hash }
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "Cannot convert deploy action view: the node returned only code hash {hash}, not the contract code"
+                )
+            );
+        }
+        // Non-deploy views have no code hash.
+        let view: ActionView = serde_json::from_value(serde_json::json!("CreateAccount")).unwrap();
+        assert!(view.deploy_code_hash().is_none());
+    }
+
+    #[test]
+    fn deploy_view_with_wrong_length_code_is_rejected() {
+        // Someone (or some tool) put actual WASM bytes in `code` instead of the hash.
+        let json = serde_json::json!({ "DeployContract": { "code": STANDARD.encode(b"\0asm\x01\0\0\0") } });
+        let view: ActionView = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            view.deploy_code_hash().unwrap(),
+            Err(ActionViewConversionError::InvalidCodeHash { actual: 8 })
+        );
+        assert_eq!(
+            Action::try_from(view),
+            Err(ActionViewConversionError::InvalidCodeHash { actual: 8 })
+        );
+    }
+
+    #[test]
+    fn use_global_contract_by_hash_and_account() {
+        let hash = CryptoHash::hash(b"x");
+        assert_eq!(
+            convert(serde_json::json!({
+                "UseGlobalContract": { "code_hash": hash.to_string() }
+            }))
+            .unwrap(),
+            Action::deploy_from_hash(hash)
+        );
+        assert_eq!(
+            convert(serde_json::json!({
+                "UseGlobalContractByAccountId": { "account_id": "publisher.near" }
+            }))
+            .unwrap(),
+            Action::deploy_from_account("publisher.near".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn deterministic_state_init_decodes_base64_data() {
+        let hash = CryptoHash::hash(b"y");
+        let json = serde_json::json!({
+            "DeterministicStateInit": {
+                "code": { "hash": hash.to_string() },
+                "data": { STANDARD.encode(b"key"): STANDARD.encode(b"value") },
+                "deposit": "1"
+            }
+        });
+        let expected = Action::state_init(
+            StateInit::by_hash(hash, BTreeMap::from([(b"key".to_vec(), b"value".to_vec())])),
+            NearToken::from_yoctonear(1),
+        );
+        assert_eq!(convert(json).unwrap(), expected);
+    }
+
+    #[test]
+    fn delegate_with_nested_function_call_round_trips() {
+        let json = serde_json::json!({
+            "Delegate": {
+                "delegate_action": {
+                    "sender_id": "alice.near",
+                    "receiver_id": "contract.near",
+                    "actions": [{
+                        "FunctionCall": {
+                            "method_name": "hi",
+                            "args": STANDARD.encode(b"{}"),
+                            "gas": 5000000000000_u64,
+                            "deposit": "0"
+                        }
+                    }],
+                    "nonce": 42_u64,
+                    "max_block_height": 100_u64,
+                    "public_key": PK
+                },
+                "signature": SIG
+            }
+        });
+        let inner = Action::function_call(
+            "hi",
+            b"{}".to_vec(),
+            Gas::from_tgas(5),
+            NearToken::from_yoctonear(0),
+        );
+        let expected = Action::Delegate(Box::new(SignedDelegateAction {
+            delegate_action: DelegateAction {
+                sender_id: "alice.near".parse().unwrap(),
+                receiver_id: "contract.near".parse().unwrap(),
+                actions: vec![NonDelegateAction::from_action(inner).unwrap()],
+                nonce: 42,
+                max_block_height: 100,
+                public_key: pk(),
+            },
+            signature: SIG.parse().unwrap(),
+        }));
+        assert_eq!(convert(json).unwrap(), expected);
+    }
+
+    #[test]
+    fn delegate_v2_with_gas_key_nonce_round_trips() {
+        let json = serde_json::json!({
+            "DelegateV2": {
+                "delegate_action": {
+                    "V2": {
+                        "sender_id": "alice.near",
+                        "receiver_id": "bob.near",
+                        "actions": [{ "Transfer": { "deposit": "1" } }],
+                        "nonce": { "GasKeyNonce": { "nonce": 42, "nonce_index": 3 } },
+                        "max_block_height": 100,
+                        "public_key": PK
+                    }
+                },
+                "signature": SIG
+            }
+        });
+        let expected = Action::DelegateV2(Box::new(VersionedSignedDelegateAction {
+            delegate_action: VersionedDelegateActionPayload::V2(DelegateActionV2 {
+                sender_id: "alice.near".parse().unwrap(),
+                receiver_id: "bob.near".parse().unwrap(),
+                actions: vec![
+                    NonDelegateAction::from_action(Action::transfer(NearToken::from_yoctonear(1)))
+                        .unwrap(),
+                ],
+                nonce: TransactionNonce::from_nonce_and_index(42, 3),
+                max_block_height: 100,
+                public_key: pk(),
+            }),
+            signature: SIG.parse().unwrap(),
+        }));
+        assert_eq!(convert(json).unwrap(), expected);
+    }
+
+    #[test]
+    fn nested_delegate_is_rejected() {
+        let inner_delegate = serde_json::json!({
+            "Delegate": {
+                "delegate_action": {
+                    "sender_id": "alice.near",
+                    "receiver_id": "bob.near",
+                    "actions": [],
+                    "nonce": 1_u64,
+                    "max_block_height": 1_u64,
+                    "public_key": PK
+                },
+                "signature": SIG
+            }
+        });
+        let json = serde_json::json!({
+            "Delegate": {
+                "delegate_action": {
+                    "sender_id": "alice.near",
+                    "receiver_id": "bob.near",
+                    "actions": [inner_delegate],
+                    "nonce": 1_u64,
+                    "max_block_height": 1_u64,
+                    "public_key": PK
+                },
+                "signature": SIG
+            }
+        });
+        assert_eq!(
+            convert(json),
+            Err(ActionViewConversionError::NestedDelegate)
+        );
+    }
+}

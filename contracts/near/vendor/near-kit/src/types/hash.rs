@@ -1,0 +1,340 @@
+//! Cryptographic hash type.
+
+use std::fmt::{self, Debug, Display};
+use std::str::FromStr;
+
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
+use sha2::{Digest, Sha256};
+
+use crate::error::ParseHashError;
+
+/// A 32-byte SHA-256 hash used for block hashes, transaction hashes, etc.
+///
+/// # near-sdk interop
+///
+/// near-sdk's `CryptoHash` is `pub type CryptoHash = [u8; 32]`, so converting
+/// in either direction is just `.into()`, zero-cost and with no near-sdk
+/// dependency:
+///
+/// ```rust,ignore
+/// let kit: near_kit::CryptoHash = sdk_hash.into(); // [u8; 32] -> CryptoHash
+/// let sdk: [u8; 32] = kit.into();                  // CryptoHash -> [u8; 32]
+/// ```
+///
+/// near-sdk's JSON-facing `Base58CryptoHash` is a separate newtype; convert it
+/// through `[u8; 32]` (it has `From<Base58CryptoHash> for [u8; 32]` and
+/// `From<[u8; 32]>` upstream):
+///
+/// ```rust,ignore
+/// let kit: near_kit::CryptoHash = <[u8; 32]>::from(base58_hash).into();
+/// let base58 = Base58CryptoHash::from(<[u8; 32]>::from(kit));
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, SerializeDisplay, DeserializeFromStr)]
+pub struct CryptoHash([u8; 32]);
+
+impl CryptoHash {
+    /// The zero hash (32 zero bytes).
+    pub const ZERO: Self = Self([0; 32]);
+
+    /// Hash the given data with SHA-256.
+    pub fn hash(data: &[u8]) -> Self {
+        let result = Sha256::digest(data);
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&result);
+        Self(bytes)
+    }
+
+    /// Create from raw 32 bytes.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Get the raw 32 bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Convert to a `Vec<u8>`.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    /// Check if this is the zero hash.
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+}
+
+impl FromStr for CryptoHash {
+    type Err = ParseHashError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|e| ParseHashError::InvalidBase58(e.to_string()))?;
+
+        if bytes.len() != 32 {
+            return Err(ParseHashError::InvalidLength(bytes.len()));
+        }
+
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Self(arr))
+    }
+}
+
+impl TryFrom<&str> for CryptoHash {
+    type Error = ParseHashError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl TryFrom<&[u8]> for CryptoHash {
+    type Error = ParseHashError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        if bytes.len() != 32 {
+            return Err(ParseHashError::InvalidLength(bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        Ok(Self(arr))
+    }
+}
+
+impl From<[u8; 32]> for CryptoHash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<CryptoHash> for [u8; 32] {
+    fn from(hash: CryptoHash) -> Self {
+        hash.0
+    }
+}
+
+impl From<&CryptoHash> for [u8; 32] {
+    fn from(hash: &CryptoHash) -> Self {
+        hash.0
+    }
+}
+
+impl AsRef<[u8]> for CryptoHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Display for CryptoHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", bs58::encode(&self.0).into_string())
+    }
+}
+
+impl Debug for CryptoHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CryptoHash({})", self)
+    }
+}
+
+impl BorshSerialize for CryptoHash {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(&self.0)
+    }
+}
+
+impl BorshDeserialize for CryptoHash {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let mut bytes = [0u8; 32];
+        reader.read_exact(&mut bytes)?;
+        Ok(Self(bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash() {
+        let hash = CryptoHash::hash(b"hello world");
+        assert!(!hash.is_zero());
+        assert_eq!(hash.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn test_display_parse_roundtrip() {
+        let hash = CryptoHash::hash(b"test data");
+        let s = hash.to_string();
+        let parsed: CryptoHash = s.parse().unwrap();
+        assert_eq!(hash, parsed);
+    }
+
+    #[test]
+    fn test_zero() {
+        assert!(CryptoHash::ZERO.is_zero());
+        assert!(!CryptoHash::hash(b"x").is_zero());
+    }
+
+    #[test]
+    fn test_from_bytes() {
+        let bytes = [42u8; 32];
+        let hash = CryptoHash::from_bytes(bytes);
+        assert_eq!(hash.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn test_to_vec() {
+        let hash = CryptoHash::hash(b"test");
+        let vec = hash.to_vec();
+        assert_eq!(vec.len(), 32);
+        assert_eq!(vec.as_slice(), hash.as_bytes());
+    }
+
+    #[test]
+    fn test_from_32_byte_array() {
+        let bytes = [1u8; 32];
+        let hash: CryptoHash = bytes.into();
+        assert_eq!(hash.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn test_into_32_byte_array() {
+        // near-sdk's CryptoHash is [u8; 32], so this is the reverse of From<[u8; 32]>.
+        let bytes = [7u8; 32];
+        let hash: CryptoHash = bytes.into();
+        let back: [u8; 32] = hash.into();
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn test_ref_into_32_byte_array() {
+        let hash = CryptoHash::from_bytes([9u8; 32]);
+        let bytes: [u8; 32] = (&hash).into();
+        assert_eq!(&bytes, hash.as_bytes());
+    }
+
+    #[test]
+    fn test_hash_value_32_byte_roundtrip() {
+        let hash = CryptoHash::hash(b"near-sdk interop");
+        let bytes: [u8; 32] = hash.into();
+        let back: CryptoHash = bytes.into();
+        assert_eq!(hash, back);
+    }
+
+    #[test]
+    fn test_try_from_slice_success() {
+        let bytes = [2u8; 32];
+        let hash = CryptoHash::try_from(bytes.as_slice()).unwrap();
+        assert_eq!(hash.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn test_try_from_slice_wrong_length() {
+        let bytes = [3u8; 16]; // Wrong length
+        let result = CryptoHash::try_from(bytes.as_slice());
+        assert!(matches!(
+            result,
+            Err(crate::error::ParseHashError::InvalidLength(16))
+        ));
+    }
+
+    #[test]
+    fn test_try_from_str() {
+        let hash = CryptoHash::hash(b"test");
+        let s = hash.to_string();
+        let parsed = CryptoHash::try_from(s.as_str()).unwrap();
+        assert_eq!(hash, parsed);
+    }
+
+    #[test]
+    fn test_as_ref() {
+        let hash = CryptoHash::hash(b"test");
+        let slice: &[u8] = hash.as_ref();
+        assert_eq!(slice.len(), 32);
+        assert_eq!(slice, hash.as_bytes());
+    }
+
+    #[test]
+    fn test_debug_format() {
+        let hash = CryptoHash::ZERO;
+        let debug = format!("{:?}", hash);
+        assert!(debug.starts_with("CryptoHash("));
+        assert!(debug.contains("1111111111")); // Zero hash in base58
+    }
+
+    #[test]
+    fn test_parse_invalid_base58() {
+        // Invalid base58 characters
+        let result: Result<CryptoHash, _> = "invalid!@#$%base58".parse();
+        assert!(matches!(
+            result,
+            Err(crate::error::ParseHashError::InvalidBase58(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_wrong_length() {
+        // Valid base58 but wrong length (too short)
+        let result: Result<CryptoHash, _> = "3xRDxw".parse();
+        assert!(matches!(
+            result,
+            Err(crate::error::ParseHashError::InvalidLength(_))
+        ));
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let hash = CryptoHash::hash(b"serde test");
+        let json = serde_json::to_string(&hash).unwrap();
+        let parsed: CryptoHash = serde_json::from_str(&json).unwrap();
+        assert_eq!(hash, parsed);
+    }
+
+    #[test]
+    fn test_borsh_roundtrip() {
+        let hash = CryptoHash::hash(b"borsh test");
+        let bytes = borsh::to_vec(&hash).unwrap();
+        assert_eq!(bytes.len(), 32);
+        let parsed: CryptoHash = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(hash, parsed);
+    }
+
+    #[test]
+    fn test_hash_deterministic() {
+        let hash1 = CryptoHash::hash(b"same input");
+        let hash2 = CryptoHash::hash(b"same input");
+        assert_eq!(hash1, hash2);
+
+        let hash3 = CryptoHash::hash(b"different input");
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_default() {
+        let hash = CryptoHash::default();
+        assert!(hash.is_zero());
+        assert_eq!(hash, CryptoHash::ZERO);
+    }
+
+    #[test]
+    fn test_clone() {
+        let hash1 = CryptoHash::hash(b"clone test");
+        #[allow(clippy::clone_on_copy)]
+        let hash2 = hash1.clone(); // Intentionally testing Clone impl
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_comparison() {
+        let hash1 = CryptoHash::from_bytes([0u8; 32]);
+        let hash2 = CryptoHash::from_bytes([1u8; 32]);
+        // CryptoHash doesn't implement Ord, but we can compare for equality
+        assert_ne!(hash1, hash2);
+        assert_eq!(hash1, CryptoHash::ZERO);
+    }
+}

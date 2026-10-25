@@ -127,16 +127,16 @@ The previously open PRD item `2117` now has local sandbox integration coverage. 
 
 The integration test uses loopback RPC and sandbox-scoped accounts only. No public RPC, live signer, signature request, destination-chain broadcast, deployment, or production operation was performed. This closes only the local sandbox-test checklist item; it does not validate testnet/mainnet behavior, contract governance, destination-chain security, or release readiness.
 
-Full local validation on October 25 passed: 96 Python tests; 68 NEAR unit tests plus the 1 sandbox integration test; 28 Foundry tests including the invariant campaign; 1 dual-Anvil integration test; and the configured Slither, Semgrep, Aderyn, and Gitleaks checks. The Gitleaks worktree scan covers tracked and non-ignored working-tree files; its full fetched-history scan and synthetic redaction/detection self-test were clean. Hosted CI for the sandbox slice remains pending until this change is pushed and its run is verified.
+Full local validation for the sandbox commit on October 25 passed: 96 Python tests; 68 NEAR unit tests plus the 1 sandbox integration test; 28 Foundry tests including the invariant campaign; 1 dual-Anvil integration test; and the configured Slither, Semgrep, Aderyn, and Gitleaks checks. The Gitleaks worktree scan covers tracked and non-ignored working-tree files; its full fetched-history scan and synthetic redaction/detection self-test were clean. Hosted Actions run `40151976435` for commit `f8261c6e895b0f445de9c9ce2943ea2e0c55f218` passed all four expected jobs (`protocol-ci`, `protocol-near`, `protocol-evm`, `protocol-secrets`) with zero annotations.[40] The follow-up dependency-remediation worktree also passed the complete local `make ci` on October 25; hosted CI for that follow-up revision remains pending.
 
-The sandbox test dependencies add the explicitly documented Rustls/Rustls-WebPKI advisory matches; the available stable NEAR dependency constraints prevented a compatible lockfile-only update. They remain test-only and are not in the normal Wasm dependency graph, but are unresolved dependency debt and remain within the pre-deployment audit gate. See [`docs/protocol/dependency-maintenance.md`](dependency-maintenance.md#addendum--near-sandbox-test-dependency-advisories-2026-10-25). No deployment gate is closed by this local test result.
+The original sandbox test dependency graph introduced six Rustls/Rustls-WebPKI advisory matches. A follow-up, test-only vendored `near-kit` feature patch disables unused `reqwest` TLS defaults for the loopback-only sandbox client; four upstream credential-shaped `#[cfg(test)]` fixture functions were omitted from the vendored copy, without changing production code. The lockfile now resolves Rustls `0.23.46` and Rustls-WebPKI `0.103.16`. The focused sandbox integration test, complete local `make ci`, and an OSV comparison passed, leaving only the three previously known Rust lockfile advisories in that graph. Hosted CI for this follow-up revision remains pending. See [`docs/protocol/dependency-maintenance.md`](dependency-maintenance.md#addendum--near-sandbox-test-dependency-advisories-2026-10-25). This scoped remediation does not close the complete audit/deployment gate.
 
-## Unchecked PRD item reconciliation (October 24, 2026)
+## Unchecked PRD item reconciliation (October 25, 2026)
 
-The 47 unchecked PRD items were rechecked; none is invalidated by this source audit. Status is classified by the evidence available in this worktree:
+The earlier October 24 review rechecked the 47 then-unchecked PRD items; none was invalidated. This October 25 update closes item `2117` at local sandbox-test scope. Status below reflects that additional evidence:
 
 - **Deferred—KI prerequisite and integration:** `2095–2110` and `2126–2135` remain blocked by the unfinished KI refactor and unresolved KI PR target. No KI migrations, bridge writes, durable event bus, Baal/EAS integration, or KI recovery work was undertaken; KI remains canonical and paused.
-- **Blocked—NEAR sandbox:** `2117` remains open. The 68 local unit tests and optimized Wasm build are not sandbox integration evidence.
+- **Closed at local sandbox-test scope—NEAR sandbox:** `2117` is implemented and exercised by the pinned loopback sandbox integration test described above. This does not establish public-network, testnet, live-signer, or production behavior.
 - **Blocked—real EVM component and permanent-admin proof:** `2138–2142` and `2145` remain open. The audited factory and fixture/invariant tests do not identify a real component, version/network configuration, Safe/DAO target, or component-specific privileged paths.
 - **Open—Revenue Container implementation:** `2150–2155` remain open. The offline integer-base-unit simulator is proposal/model-only; it does not supply a pilot, accounting, versioned policy, Shares/Loot, Ragequit implementation, or economic/legal review.
 - **Blocked—public/testnet E2E:** `2158` remains prohibited until the full security gate is satisfied and separate explicit deployment authorization is provided.
@@ -152,7 +152,7 @@ The 47 unchecked PRD items were rechecked; none is invalidated by this source au
 2. Supply and audit the actual EVM project component, its full authority/upgrade paths, and the exact intended Safe/DAO target.
 3. Confirm NEAR administrator multisig/governance, rotation and recovery procedures, and storage funding/retention policy.
 4. Decide and implement production stale-signature/expiry controls at the destination; the NEAR state transition cannot revoke an already-issued signature.
-5. Verify the pinned-source cargo-near and Foundry build jobs in hosted GitHub Actions. Keep their outputs ephemeral and unpublished; if either tool is ever redistributed, establish separate release-specific build and provenance evidence.
+5. The pinned-source cargo-near and Foundry build jobs passed in hosted run `40151976435`.[40] Keep their outputs ephemeral and unpublished; if either tool is ever redistributed, establish separate release-specific build and provenance evidence.
 6. Obtain separate explicit authorization before any testnet deployment, live signature request, or destination-chain activity.
 
 ## Sources
@@ -189,3 +189,4 @@ The 47 unchecked PRD items were rechecked; none is invalidated by this source au
 [37] https://api.github.com/repos/wasalo/Kokonut-Protocol/actions/runs/40134749882 — GitHub Actions run 40134749882 API record
 [38] https://api.github.com/repos/wasalo/Kokonut-Protocol/actions/runs/40134749882/jobs?per_page=100 — GitHub Actions jobs for run 40134749882
 [39] https://api.github.com/repos/wasalo/Kokonut-Protocol/commits/5e5fb814e56e7269b3e7e1a23e29ade0c6383266/check-runs?per_page=100 — GitHub check runs and annotations for token-free provenance commit
+[40] https://github.com/wasalo/Kokonut-Protocol/actions/runs/40151976435 — Hosted CI for NEAR sandbox integration commit; all four jobs passed with zero annotations

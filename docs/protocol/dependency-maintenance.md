@@ -28,7 +28,7 @@
 
 ## Advisory review and residuals
 
-The exact OSV querybatch review covered 279 Cargo.lock package/version pairs, 51 installed Protocol/Slither Python pairs, and 66 installed Semgrep Python pairs. It returned five advisory matches: three Rust lockfile matches, no match in the Protocol/Slither Python environment, and two Semgrep-only Python matches. The exact findings follow.[23][24][25]
+The October 24 baseline OSV querybatch review covered 279 Cargo.lock package/version pairs, 51 installed Protocol/Slither Python pairs, and 66 installed Semgrep Python pairs. It returned five advisory matches: three Rust lockfile matches, no match in the Protocol/Slither Python environment, and two Semgrep-only Python matches. This is a historical pre-sandbox snapshot; the current NEAR lockfile and its comparison are recorded in the October 25 addendum below.[23][24][25]
 
 - `crypto-bigint 0.5.5`, pulled through `near-sdk`'s `unit-testing` feature → `near-vm-runner` → `p256 0.13.2`, matches RustSec `RUSTSEC-2026-0387`, published **October 23, 2026**. The advisory describes secret-dependent timing variability and marks `0.7.6` as fixed. The current NEAR stable dependency path constrains `p256` to the incompatible `crypto-bigint 0.5` line; do not force a major-version override. `cargo tree --target wasm32-unknown-unknown --edges normal` does not include this test-only package. Revisit when NEAR publishes a compatible stable dependency update; include it in the full audit.[5][23]
 - Semgrep v1.182.1 still requires `mcp==1.29.0` and `opentelemetry-api~=1.37.0`.[30]
@@ -41,15 +41,23 @@ GitHub rates the MCP and OpenTelemetry records **MODERATE**.[17][18]
 
 The RustSec records for `crypto-bigint`, `lru`, and `unsafe-libyaml` provide no numeric severity score in the OSV severity field; this snapshot does not assign one.[5][6][7]
 
-These findings remain open where upstream stable constraints prevent a safe update. A green CI run does not resolve them or satisfy the full audit gate. No public/testnet or production deployment is authorized by this snapshot.
+The remaining findings stay open where upstream stable constraints prevent a safe update. A green CI run does not resolve them or satisfy the full audit gate. No public/testnet or production deployment is authorized by this snapshot.
 
 ## Addendum — NEAR sandbox test dependency advisories (2026-10-25)
 
-A fresh OSV querybatch compared 278 registry package/version pairs at `origin/develop` with 437 in the sandbox-test lockfile. It returned nine advisory matches across five current package/version pairs. The three existing pairs (`crypto-bigint 0.5.5`, `lru 0.16.4`, and `unsafe-libyaml 0.2.11`) remain as documented above. The newly added test-only graph adds `rustls 0.23.43` (RUSTSEC-2026-0285/0346/0348/0349, plus its GHSA record) and `rustls-webpki 0.103.13` (RUSTSEC-2026-0382).[38][39][40][41][42]
+A fresh OSV querybatch compared 278 registry package/version pairs at the pre-sandbox `origin/develop` revision with 437 in the original sandbox-test lockfile. It returned nine advisory matches across five current package/version pairs. The three pre-existing pairs (`crypto-bigint 0.5.5`, `lru 0.16.4`, and `unsafe-libyaml 0.2.11`) remain as documented above. The original test-only graph also added `rustls 0.23.43` (RUSTSEC-2026-0285/0346/0348/0349, plus its GHSA record) and `rustls-webpki 0.103.13` (RUSTSEC-2026-0382).[38][39][40][41][42]
 
-These packages enter through the `near-kit` and `near-sandbox` development dependencies. The NEAR test uses only the sandbox's loopback HTTP RPC endpoint, and `cargo tree --target wasm32-unknown-unknown --edges normal` contains none of the new TLS/test-client packages. This limits runtime exposure; it does not erase the advisory matches or establish a clean dependency audit.
+These packages entered through the `near-kit` and `near-sandbox` development dependencies. The NEAR test uses only the sandbox's loopback HTTP RPC endpoint, and `cargo tree --target wasm32-unknown-unknown --edges normal` contains none of the TLS/test-client packages. This limits runtime exposure; it does not erase advisory matches or establish a clean dependency audit.
 
-Attempts to move the graph to `rustls 0.23.46` and `rustls-webpki 0.103.16` failed to resolve: the selected TLS features require `aws-lc-rs >=1.18`, while the current stable NEAR stack (`near-sdk 5.29.1` → `near-crypto 0.37.4`) pins `aws-lc-rs =1.16.2`. No incompatible override was forced. Record these test-tool advisories as open dependency debt; resolve them through a compatible stable NEAR/client update or a separately reviewed test-client feature change before any public/testnet deployment. No public deployment is authorized by this addendum.
+Initial attempts to move the original feature graph to `rustls 0.23.46` and `rustls-webpki 0.103.16` failed to resolve: `near-kit`'s default `reqwest` TLS features activated an `aws-lc-rs >=1.18` requirement, conflicting with the current stable NEAR stack's `aws-lc-rs =1.16.2` pin. No incompatible override was forced. The reviewed feature-level remediation and its remaining limits follow.
+
+### Resolution update — HTTP-only sandbox client (2026-10-25)
+
+The repository vendors the exact `near-kit 0.19.0` crates.io archive. Its SHA-256 (`6ac835efbcc11c23fdee426155995a7316c4f893ec05f6c0c5d355182795ac92`) matched the checksum in the original registry lock entry. The vendored copy has one manifest feature change (`reqwest` `default-features = false`), omits four upstream `#[cfg(test)]` functions containing credential-shaped fixtures detected by the pinned secret scanner, and removes trailing whitespace from five blank Rustdoc lines so the source passes `git diff --check`. The omitted tests are not compiled when `near-kit` is a dependency, and no production code was changed. All remaining archive files were byte-compared and matched. `cargo tree -e features -i reqwest` shows only the `json` feature for this patched `near-kit` dependency. The sandbox integration uses loopback HTTP only. Do not use this patched test client for HTTPS/public RPC or application transport; any such use requires separate feature and provider review. Patch provenance and scope are in [`contracts/near/vendor/near-kit/README.kokonut.md`](../../contracts/near/vendor/near-kit/README.kokonut.md).[43]
+
+The sandbox tool's remaining TLS path is `near-sandbox 0.3.16 → ureq 3.4.2 → rustls`. The lockfile now resolves `rustls 0.23.46` and `rustls-webpki 0.103.16`; `ureq` selects the `ring` provider, so the prior `aws-lc-rs` conflict is no longer present. The updated current lockfile contains 395 registry package/version pairs versus 437 at the sandbox baseline (`f8261c6e895b0f445de9c9ce2943ea2e0c55f218`). A fresh OSV query returned only the three previously known Rust package/version matches (`crypto-bigint 0.5.5`, `lru 0.16.4`, `unsafe-libyaml 0.2.11`), with zero newly introduced affected pairs; all six Rustls/Rustls-WebPKI advisory matches from the original graph no longer match the updated versions.[38][39][40][41][42]
+
+`make test-near-sandbox` and the complete local `make ci` passed on October 25 with the patched dependency graph. Full CI included 96 Python tests; 68 NEAR unit tests plus 1 sandbox integration test; 28 Foundry tests; 1 dual-Anvil integration test; Slither (0 findings), Semgrep (49 rules, 0 findings), Aderyn (0 high findings), and a clean Gitleaks worktree/history scan and self-test. Hosted CI for the follow-up dependency revision remains pending. The three retained Rust advisories and Semgrep's two Python dependency advisories remain separate full-audit items; this scoped sandbox-tool remediation does not satisfy the complete predeployment security gate. No live signer, public RPC, broadcast, or deployment was used.
 
 ## Sources
 
@@ -89,3 +97,5 @@ Attempts to move the graph to `rustls 0.23.46` and `rustls-webpki 0.103.16` fail
 [40] https://rustsec.org/advisories/RUSTSEC-2026-0348.html
 [41] https://rustsec.org/advisories/RUSTSEC-2026-0349.html
 [42] https://rustsec.org/advisories/RUSTSEC-2026-0382.html
+[43] https://crates.io/api/v1/crates/near-kit/0.19.0
+[44] https://github.com/wasalo/Kokonut-Protocol/actions/runs/40151976435

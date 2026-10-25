@@ -45,6 +45,8 @@ The integration test deploys the built Wasm to a fresh local `near-sandbox`, ini
 
 The test harness versions are exact-pinned in `Cargo.toml` and `Cargo.lock`. The NEAR node binary version is pinned in `.near-sandbox-version`; the Linux x86_64 archive is SHA-256 checked by `scripts/install-near-sandbox-pinned.sh` before extraction. The checksum pins the downloaded bytes, not independent build provenance. This is test-only tooling and does not alter production artifact trust requirements.
 
+The test-only `near-kit 0.19.0` dependency is vendored from its checksum-verified crates.io archive. Its `reqwest` default features are disabled so the sandbox client uses loopback HTTP without unused TLS; four upstream `#[cfg(test)]` fixture functions containing credential-shaped strings are omitted to avoid copying them into the repository. No production code was changed. The patched client is intentionally unsuitable for HTTPS/public RPC or application transport. See [`vendor/near-kit/README.kokonut.md`](vendor/near-kit/README.kokonut.md) for exact provenance and patch scope.
+
 Run from the repository root:
 
 ```sh
