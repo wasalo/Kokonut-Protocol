@@ -2,13 +2,15 @@
 
 **Status:** Local sandbox observation for governance discussion only; not a storage policy, fee quote, or deployment evidence.
 **Measured:** October 25, 2026
-**Base:** `develop` at pushed `747859cea7e27be77d47de0c0722a8ab4c97d2a6`; measurement changes are local-only and have no hosted run.
+**Pushed baseline:** `747859cea7e27be77d47de0c0722a8ab4c97d2a6` (`origin/develop`).
+**Measurement source/test commit:** `219bc6f9d392dd27a4483ef2fc0bd4c918cbcb75` (local `develop`, unpushed; no hosted run).
+**Validation:** Full local `make ci` passed on the measurement commit; hosted Actions run `40202403269` covers the pushed baseline only.
 
 ## Method
 
 The existing local asynchronous mock-signature sandbox scenario now samples the Hub account's `storage_usage` at block-pinned receipts executed by the Hub. Samples cover a configured baseline, proposal, approval, pending signature request, issued callback, a second pending request, cancellation, and its late callback. The sample sequence is emitted by `deployed_hub_issues_and_persists_mock_chain_signature_callback` in `contracts/near/tests/sandbox.rs`.
 
-The request path uses the current contract state machine and local mock Chain Signatures fixture. The issued-response fixture has representative field lengths—65 bytes for `big_r.affine_point`, 32 bytes for `s.scalar`, and a recovery ID—but its repeated hex values are deliberately not a valid cryptographic signature. No live signer is used. `eip155:8453` is request data only; no destination-chain RPC, public RPC, testnet, transaction broadcast, or deployment is involved.
+The request path uses the current contract state machine and local mock Chain Signatures fixture. The issued-response fixture has representative field lengths—65 bytes for `big_r.affine_point`, 32 bytes for `s.scalar`, and a recovery ID—but its repeated hex values are placeholders, not generated or verified as a cryptographic signature. No live signer is used. `eip155:8453` is request data only; no destination-chain RPC, public RPC, testnet, transaction broadcast, or deployment is involved.
 
 The configured baseline is sampled after chain, project, signer, and execution-policy setup. The absolute account `storage_usage` includes the NEAR account footprint, including contract code and contract storage ([NEAR account data model](https://github.com/near/nearcore/blob/master/docs/DataStructures/Account.md)); the deltas below are the useful request-lifecycle observations. Each query is pinned to the block hash of a receipt whose executor is the NEAR Hub, not an adjacent signer-fixture receipt.
 
