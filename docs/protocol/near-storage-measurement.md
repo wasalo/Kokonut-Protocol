@@ -2,9 +2,9 @@
 
 **Status:** Local sandbox observation for governance discussion only; not a storage policy, fee quote, or deployment evidence.
 **Measured:** October 25, 2026
-**Pushed baseline:** `592cf94caab1d8a49702e21e0d3a045ed3bcc1df` (`origin/develop`); hosted Actions run `40211865013` passed all four jobs with zero annotations for this SHA.
-**Measurement/test commit:** `520db5a32aeca873470f9a05608dd593245606db` (local `develop`, unpushed; no hosted run).
-**Validation:** Full local `make ci` passed on the exact tree committed as `520db5a`; hosted run `40211865013` covers the pushed baseline only.
+**Hosted validation revision:** `492504a13c649f5583707e1cc2b966f8ed92747e` (pushed to `develop`, includes the measurement/test commit below); hosted Actions run `40223830190` passed all four jobs with zero annotations for this SHA.
+**Measurement/test commit:** `520db5a32aeca873470f9a05608dd593245606db` (pushed ancestor of the baseline above).
+**Validation:** Full local `make ci` passed on the code/test tree committed as `520db5a`; hosted run `40223830190` passed for pushed commit `492504a`, which includes that test-only code.
 
 ## Method
 
