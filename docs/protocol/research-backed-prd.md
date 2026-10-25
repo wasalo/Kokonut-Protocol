@@ -21,6 +21,8 @@
 - The sandbox suite now includes local mock-signature success and cancellation paths: it observes `Pending`, resumes the mock yield, and checks persisted `Issued` state; it also cancels while pending and verifies a late callback cannot replace `Cancelled`/`Failed`. The fixture data is deliberately invalid and is not cryptographic evidence. Sandbox activity and both Anvil endpoints are local-only; no public RPC, real signer, destination-chain broadcast, or deployment occurred.
 - The October 25 advisory recheck is documented in [dependency maintenance](dependency-maintenance.md): the current NEAR lockfile has 3 previously known Rust advisory matches, and Semgrep's current latest release still resolves 2 previously known Python advisory matches. No compatible stable fixes were available; these remain open audit items.
 - Protocol-only evidence also includes the offline EVM factory and invariants, local dual-Anvil adapter exercise, execution/recovery prototypes, and security/provenance CI. None is evidence of public testnet integration, production authority, or deployment.
+- **Owner-provided EVM admin-lifecycle clarification (October 25, 2026):** the intended flow is to initialize each destination deployment with the Kokonut EVM Multisig as a temporary bootstrap admin, then transfer administration on that destination chain to the deployment's final project Safe/DAO. This is dynamic per deployment, not a hard-coded permanent admin. Current factory code accepts a per-deployment `projectAdmin` input but leaves it as the recorded admin; it has no generic transfer or handoff-verification step. The actual component, chain-qualified temporary/final addresses, and transfer path remain open gates. See [offline EVM factory](evm-factory.md).
+- **Independent decision-preparation drafts (October 25, 2026):** [NEAR governance decision memo](near-governance-decision-memo.md) and [Revenue Container economic/legal review packet](revenue-container-review-packet.md) are prepared without KI changes. They record choices for owner/governance and counsel; neither is an approved policy, legal opinion, completed review, pilot authorization, nor capital/settlement authorization.
 
 ### KI dependency and sequencing
 
@@ -779,26 +781,26 @@ Do not share one derived EVM signer across every Kokonut project and chain.
 
 ### Destination ownership
 
-The Chain Signature-derived account should preferably act as a **deployment/execution authority**, not permanent sole treasury owner.
-
-Preferred deployment:
+The Chain Signature-derived account should preferably act as a **deployment/execution authority**, not permanent sole treasury owner. The product owner's intended two-stage flow is:
 
 ```text
 NEAR-derived signer
-        │
         │ calls allowlisted factory
         ▼
 Project Factory
-        │
-        ├── deploy project contract
-        ├── configure project ID
-        └── set permanent admin
-                 │
-                 ▼
-          Project Safe / DAO
+        │ deploys and initializes with
+        │ Kokonut EVM Multisig (temporary admin)
+        ▼
+Temporary Kokonut EVM Multisig
+        │ component-specific destination-chain
+        │ transfer / acceptance transaction
+        ▼
+Deployment-specific final Project Safe / DAO
+        │ read back admin and all authority surfaces;
+        │ verify temporary/factory control is gone
 ```
 
-This allows NEAR to coordinate deployment without turning the cross-chain signer into the permanent custodian of all farm assets.
+This is a dynamic, per-deployment handoff—not a permanent EVM admin hard-coded into all deployments. The current factory's `projectAdmin` is a per-call argument, but the prototype only sets and verifies the initial admin; it does not implement or prove the later transfer. Exact component/version, network, chain-qualified temporary multisig and final Safe/DAO addresses, their governance, and the transfer/accept path must be established and tested before this checklist item can close. The temporary admin must also remain distinct from the factory configuration and deployment authorities under the current prototype's role-separation rules.
 
 ### Revenue Container architecture
 
@@ -2142,6 +2144,7 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [x] Add NEAR unit tests (68 passing).
 [x] Add local-only NEAR sandbox integration tests (pinned sandbox runtime; verifies registry persistence, unauthorized mutation rejection, policy-backed proposal → threshold approval → proposer cancellation, plus mock signature `Pending` → `Issued` and cancellation/late-callback invalidation; response fields are deliberately invalid placeholders; no public-network or real signer activity; full local `make ci` passed for local commit `c589d400d022d5f892f6fbb333dc675454a856f0`; hosted run `40156816567` applies only to prior upstream commit `806b2dafea888dc3a46709d0577572b92f46695e`).
 [x] Remediate sandbox test-only Rustls advisory matches with the documented checksum-anchored HTTP-only `near-kit` feature patch; production Wasm remains outside the sandbox TLS client graph.
+[x] Prepare NEAR governance decision memo (draft options and decision fields only; administrator governance, signer-rotation policy, and storage policy remain undecided).
 
 [x] Implement the testnet-gated NEAR Hub Chain Signatures request/callback path; no live signer client or E2E request is configured.
 [x] Enforce project/chain/purpose-scoped derivation-path policy.
@@ -2162,11 +2165,12 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Verify no attestation double counting in the KI integration (deferred with KI work).
 
 [x] Build and test offline EVM project factory prototype (not production deployment).
-[ ] Ensure permanent admin transfers to project Safe/DAO (blocked until a real EVM component and intended project-governance target are identified).
-  - [ ] Pin the exact component source/version and intended network/deployment configuration.
-  - [ ] Identify the exact intended project Safe/DAO address and validate its owners, threshold, modules/guards, fallback handler, and governance policy.
-  - [ ] Trace every privileged path, including initializer/reinitializer, roles, inherited controls, proxy/beacon/implementation/admin, upgrade, and delegatecall; prove the manifest is complete.
-  - [ ] Test the real component's admin permanence and component-specific invariants; confirm no Protocol factory authority can retain control.
+[ ] Implement and verify the temporary-to-final destination-admin handoff (blocked until a real component and exact chain-qualified targets are identified).
+  - [ ] Pin the component source/version and network/deployment configuration.
+  - [ ] Identify the temporary Kokonut EVM Multisig address on each destination chain, its governance, and its separation from factory configuration/deployment authorities.
+  - [ ] Identify the deployment-specific final Project Safe/DAO and validate owners, threshold, modules/guards, fallback handler, and governance policy.
+  - [ ] Trace every privileged path, including initializer/reinitializer, transfer/acceptance, roles, inherited controls, proxy/beacon/implementation/admin, upgrade, and delegatecall; prove the manifest is complete.
+  - [ ] Test the real component's temporary-to-final transfer and component-specific invariants; read back every controller and confirm no temporary, Protocol, or factory authority retains control.
 [x] Add Foundry fuzz tests for the offline factory prototype.
 [x] Add handler-driven Foundry invariant tests for the offline factory prototype (32 runs, depth 32; fixture-only evidence, not production readiness).
 [ ] Add production component-specific Foundry invariant tests before production readiness.
@@ -2174,6 +2178,7 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 
 [x] Pin and assess Majeur at `7d7a36b5a25d31f7aa4d499b3a57ee98f4367fac` (offline source review only; integration and activation remain unchecked).
 [x] Add offline, integer-base-unit Revenue Container waterfall simulator (proposal/model only; not accounting or settlement).
+[x] Prepare Revenue Container economic/legal review packet (jurisdiction-neutral review agenda only; not legal advice, economic audit, approval, or pilot).
 [ ] Create isolated Revenue Container pilot.
 [ ] Implement revenue-period accounting.
 [ ] Implement versioned waterfall policy.
@@ -2206,7 +2211,7 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Governance approval for financial activation.
 ```
 
-Evidence for the checked prototype items: [NEAR Hub execution controller](execution-controller.md), [testnet EVM adapter](evm-adapter.md), [offline factory](evm-factory.md), [recovery runbook](runbook.md), [offline Revenue Container simulator](revenue-containers.md), and [dependency maintenance](dependency-maintenance.md), together with their source and tests. Full local `make ci` passed for local source/test commit `c589d400d022d5f892f6fbb333dc675454a856f0`. Hosted Actions run `40156816567` passed all four jobs with zero annotations for the earlier upstream commit `806b2dafea888dc3a46709d0577572b92f46695e` only; no hosted run exists for the local commit because it has not been pushed. KI integration, production components, live operations, audits, and governance/legal approvals remain separate gates; KI refactor completion and an explicit KI PR target are prerequisites for the KI-dependent work.
+Evidence for the checked prototype items: [NEAR Hub execution controller](execution-controller.md), [testnet EVM adapter](evm-adapter.md), [offline factory](evm-factory.md), [recovery runbook](runbook.md), [offline Revenue Container simulator](revenue-containers.md), and [dependency maintenance](dependency-maintenance.md), together with their source and tests. The checked NEAR governance memo and Revenue Container review packet are preparation artifacts only; the underlying policy decisions, legal/economic reviews, and approval gates remain open. Full local `make ci` passed for local source/test commit `c589d400d022d5f892f6fbb333dc675454a856f0`. Hosted Actions run `40156816567` passed all four jobs with zero annotations for the earlier upstream commit `806b2dafea888dc3a46709d0577572b92f46695e` only; no hosted run exists for the local commit because it has not been pushed. KI integration, production components, live operations, audits, and governance/legal approvals remain separate gates; KI refactor completion and an explicit KI PR target are prerequisites for the KI-dependent work.
 
 The current repository provides a strong implementation starting point rather than a legacy obstacle: the Kernel candidate already demonstrates the two-service architectural direction, durable scheduler/event infrastructure already exists, Gnosis/Baal and Celo/EAS integrations already exist, and ARM64 images have already been built even though native Raspberry Pi certification remains open. citeturn10file0 citeturn16file0 citeturn17file0 citeturn22file0
 The architectural end state is therefore not a larger stack.

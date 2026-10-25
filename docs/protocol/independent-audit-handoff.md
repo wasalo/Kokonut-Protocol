@@ -8,7 +8,7 @@
 - **Branch:** `develop`
 - **Contract-source baseline:** `c589d400d022d5f892f6fbb333dc675454a856f0`
 - **Target verification:** This `develop` commit is local-only and has not been pushed. The last verified `origin/develop` ref is `806b2dafea888dc3a46709d0577572b92f46695e`. The audit coordinator must securely furnish the exact `c589d40...` source tree to the reviewer and have them verify the SHA before work starts. If contract/build inputs change, stop and agree a new target SHA and diff with the auditor.
-- **Scope boundary:** The target contains a NEAR Hub prototype and an offline EVM project-factory prototype. It does not contain a production EVM component, project Safe/DAO target, live signer integration, or deployed production financial contract.
+- **Scope boundary:** The target contains a NEAR Hub prototype and an offline EVM project-factory prototype. It does not contain a production EVM component, project Safe/DAO target, live signer integration, or deployed production financial contract. Owner-provided design intent is to initialize each EVM deployment under the Kokonut EVM Multisig as a temporary admin, then transfer control to the deployment-specific final Project Safe/DAO; this handoff is not implemented or verified in the target code, and no exact component or addresses are selected.
 
 This handoff describes preparation by the project team. Only a suitably qualified reviewer independent of the implementation team can satisfy the PRD's independent-audit gate.
 
