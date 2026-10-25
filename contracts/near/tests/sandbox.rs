@@ -4,7 +4,7 @@ use kokonut_protocol_near::{
 };
 use near_kit::{
     transaction::{Final, Included},
-    Near,
+    CryptoHash, Near,
 };
 use near_sandbox::config::{DEFAULT_GENESIS_ACCOUNT, DEFAULT_GENESIS_ACCOUNT_PRIVATE_KEY};
 use near_sandbox::{GenesisAccount, Sandbox, SandboxConfig};
@@ -14,6 +14,21 @@ use std::path::Path;
 
 const SANDBOX_VERSION: &str = include_str!("../.near-sandbox-version");
 const CONTRACT_ACCOUNT: &str = "sandbox";
+
+async fn contract_storage_usage_at(
+    near: &Near,
+    block_hash: CryptoHash,
+) -> Result<u64, near_kit::Error> {
+    let account = near
+        .account(CONTRACT_ACCOUNT)
+        .at_block_hash(block_hash.clone())
+        .await?;
+    assert_eq!(
+        account.block_hash, block_hash,
+        "storage query must be block-pinned"
+    );
+    Ok(account.storage_usage)
+}
 
 #[tokio::test]
 async fn deployed_hub_persists_execution_lifecycle_and_rejects_non_admin_mutation(
@@ -463,6 +478,17 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         }))
         .await?;
     assert!(policy.is_success());
+    let configured_block = policy
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub policy-configuration receipt")
+        .block_hash;
+    let mut storage_points = vec![(
+        "configured_baseline",
+        contract_storage_usage_at(&administrator, configured_block).await?,
+    )];
 
     let proposed = execution_operator
         .call(CONTRACT_ACCOUNT, "propose_execution")
@@ -492,9 +518,15 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
     assert!(proposed.is_success());
     let proposal_block = proposed
         .receipts_outcome
-        .last()
-        .expect("proposal receipt outcome")
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub proposal receipt")
         .block_hash;
+    storage_points.push((
+        "request_awaiting_approval",
+        contract_storage_usage_at(&administrator, proposal_block.clone()).await?,
+    ));
     let proposed_record: Option<ExecutionRequestRecord> = execution_operator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": REQUEST_ID }))
@@ -515,6 +547,17 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         }))
         .await?;
     assert!(approval.is_success());
+    let approval_block = approval
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub approval receipt")
+        .block_hash;
+    storage_points.push((
+        "request_approved",
+        contract_storage_usage_at(&administrator, approval_block).await?,
+    ));
 
     let signature_request = execution_operator
         .call(CONTRACT_ACCOUNT, "request_signature")
@@ -537,20 +580,31 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
             )
             .wait_until::<Included>()
             .await?;
-        if let Some(receipt) = progress
-            .outcome
-            .as_ref()
-            .and_then(|outcome| outcome.receipts_outcome.last())
-        {
-            let block_hash = receipt.block_hash;
-            recorded_request = mock_signer_client
-                .view(MOCK_SIGNER_ACCOUNT, "get_last_request")
-                .args(json!({}))
-                .at_block_hash(block_hash)
-                .await?;
-            if recorded_request.is_some() {
-                pending_signature_block = Some(block_hash);
-                break;
+        if let Some(outcome) = progress.outcome.as_ref() {
+            let signer_block = outcome
+                .receipts_outcome
+                .iter()
+                .rev()
+                .find(|receipt| receipt.outcome.executor_id.as_str() == MOCK_SIGNER_ACCOUNT)
+                .map(|receipt| receipt.block_hash.clone());
+            if let Some(signer_block) = signer_block {
+                recorded_request = mock_signer_client
+                    .view(MOCK_SIGNER_ACCOUNT, "get_last_request")
+                    .args(json!({}))
+                    .at_block_hash(signer_block)
+                    .await?;
+                if recorded_request.is_some() {
+                    if let Some(hub_block) = outcome
+                        .receipts_outcome
+                        .iter()
+                        .rev()
+                        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+                        .map(|receipt| receipt.block_hash.clone())
+                    {
+                        pending_signature_block = Some(hub_block);
+                        break;
+                    }
+                }
             }
         }
         sandbox.fast_forward(1).await?;
@@ -566,18 +620,22 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
     let pending_record: Option<ExecutionRequestRecord> = administrator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": REQUEST_ID }))
-        .at_block_hash(pending_signature_block)
+        .at_block_hash(pending_signature_block.clone())
         .await?;
     let pending_record = pending_record.expect("pending request should persist");
     assert_eq!(pending_record.status, ExecutionStatus::Approved);
     assert_eq!(pending_record.signature_status, SignatureStatus::Pending);
+    storage_points.push((
+        "request_signature_pending",
+        contract_storage_usage_at(&administrator, pending_signature_block.clone()).await?,
+    ));
 
     let resumed = mock_signer_client
         .call(MOCK_SIGNER_ACCOUNT, "resume_signature")
         .args(json!({
             "signature": {
-                "big_r": { "affine_point": "04" },
-                "s": { "scalar": "02" },
+                "big_r": { "affine_point": format!("04{}", "11".repeat(64)) },
+                "s": { "scalar": "22".repeat(32) },
                 "recovery_id": 0
             }
         }))
@@ -604,7 +662,7 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
     let issued_record: Option<ExecutionRequestRecord> = administrator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": REQUEST_ID }))
-        .at_block_hash(completed_signature_block)
+        .at_block_hash(completed_signature_block.clone())
         .await?;
     let issued_record = issued_record.expect("signed execution request should persist");
     assert_eq!(issued_record.status, ExecutionStatus::Approved);
@@ -619,9 +677,16 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
             .as_deref()
             .expect("mock callback should persist its response"),
     )?;
-    assert_eq!(signature["big_r"]["affine_point"], "04");
-    assert_eq!(signature["s"]["scalar"], "02");
+    assert_eq!(
+        signature["big_r"]["affine_point"].as_str().unwrap().len(),
+        130
+    );
+    assert_eq!(signature["s"]["scalar"].as_str().unwrap().len(), 64);
     assert_eq!(signature["recovery_id"], 0);
+    storage_points.push((
+        "request_signature_issued",
+        contract_storage_usage_at(&administrator, completed_signature_block).await?,
+    ));
 
     const CANCELLED_REQUEST_ID: &str = "00000000-0000-4000-8000-000000000013";
     let proposed_for_cancellation = execution_operator
@@ -652,9 +717,15 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
     assert!(proposed_for_cancellation.is_success());
     let cancellation_proposal_block = proposed_for_cancellation
         .receipts_outcome
-        .last()
-        .expect("cancellation proposal receipt outcome")
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub cancellation proposal receipt")
         .block_hash;
+    storage_points.push((
+        "second_request_awaiting_approval",
+        contract_storage_usage_at(&administrator, cancellation_proposal_block.clone()).await?,
+    ));
     let cancel_proposal: Option<ExecutionRequestRecord> = execution_operator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": CANCELLED_REQUEST_ID }))
@@ -669,6 +740,17 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         }))
         .await?;
     assert!(cancel_approval.is_success());
+    let cancellation_approval_block = cancel_approval
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub cancellation-path approval receipt")
+        .block_hash;
+    storage_points.push((
+        "second_request_approved",
+        contract_storage_usage_at(&administrator, cancellation_approval_block).await?,
+    ));
     let cancellation_signature_request = execution_operator
         .call(CONTRACT_ACCOUNT, "request_signature")
         .args(json!({
@@ -681,7 +763,7 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         .wait_until::<Included>()
         .await?;
 
-    let mut cancellation_signature_block = None;
+    let mut cancellation_hub_block = None;
     let mut cancellation_mock_request: Option<Value> = None;
     for _ in 0..20 {
         let progress = execution_operator
@@ -691,29 +773,39 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
             )
             .wait_until::<Included>()
             .await?;
-        if let Some(receipt) = progress
-            .outcome
-            .as_ref()
-            .and_then(|outcome| outcome.receipts_outcome.last())
-        {
-            let block_hash = receipt.block_hash;
-            cancellation_mock_request = mock_signer_client
-                .view(MOCK_SIGNER_ACCOUNT, "get_last_request")
-                .args(json!({}))
-                .at_block_hash(block_hash)
-                .await?;
-            if cancellation_mock_request
-                .as_ref()
-                .is_some_and(|request| request["payload"] == json!(vec![0xeeu8; 32]))
+        if let Some(outcome) = progress.outcome.as_ref() {
+            if let Some(signer_block) = outcome
+                .receipts_outcome
+                .iter()
+                .rev()
+                .find(|receipt| receipt.outcome.executor_id.as_str() == MOCK_SIGNER_ACCOUNT)
+                .map(|receipt| receipt.block_hash.clone())
             {
-                cancellation_signature_block = Some(block_hash);
-                break;
+                cancellation_mock_request = mock_signer_client
+                    .view(MOCK_SIGNER_ACCOUNT, "get_last_request")
+                    .args(json!({}))
+                    .at_block_hash(signer_block)
+                    .await?;
+                if cancellation_mock_request
+                    .as_ref()
+                    .is_some_and(|request| request["payload"] == json!(vec![0xeeu8; 32]))
+                {
+                    cancellation_hub_block = outcome
+                        .receipts_outcome
+                        .iter()
+                        .rev()
+                        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+                        .map(|receipt| receipt.block_hash.clone());
+                    if cancellation_hub_block.is_some() {
+                        break;
+                    }
+                }
             }
         }
         sandbox.fast_forward(1).await?;
     }
-    let cancellation_signature_block =
-        cancellation_signature_block.expect("mock signer receipt should be included");
+    let cancellation_hub_block =
+        cancellation_hub_block.expect("Hub request-signature receipt should be included");
     let cancellation_mock_request = cancellation_mock_request
         .expect("mock signer should receive the cancellation-path request");
     assert_eq!(
@@ -723,7 +815,7 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
     let pending_cancellation_record: Option<ExecutionRequestRecord> = administrator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": CANCELLED_REQUEST_ID }))
-        .at_block_hash(cancellation_signature_block)
+        .at_block_hash(cancellation_hub_block.clone())
         .await?;
     let pending_cancellation_record =
         pending_cancellation_record.expect("signature-pending request should persist");
@@ -731,6 +823,10 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         pending_cancellation_record.signature_status,
         SignatureStatus::Pending
     );
+    storage_points.push((
+        "second_request_signature_pending",
+        contract_storage_usage_at(&administrator, cancellation_hub_block).await?,
+    ));
 
     let cancelled = execution_operator
         .call(CONTRACT_ACCOUNT, "cancel_execution")
@@ -744,6 +840,9 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
         .expect("Hub cancellation receipt")
         .block_hash;
+    let cancelled_storage =
+        contract_storage_usage_at(&administrator, cancelled_block.clone()).await?;
+    storage_points.push(("second_request_cancelled", cancelled_storage));
     let cancelled_record: Option<ExecutionRequestRecord> = administrator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": CANCELLED_REQUEST_ID }))
@@ -758,8 +857,8 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         .call(MOCK_SIGNER_ACCOUNT, "resume_signature")
         .args(json!({
             "signature": {
-                "big_r": { "affine_point": "04" },
-                "s": { "scalar": "02" },
+                "big_r": { "affine_point": format!("04{}", "11".repeat(64)) },
+                "s": { "scalar": "22".repeat(32) },
                 "recovery_id": 0
             }
         }))
@@ -789,7 +888,7 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
     let after_late_callback: Option<ExecutionRequestRecord> = administrator
         .view(CONTRACT_ACCOUNT, "get_execution_request")
         .args(json!({ "request_id": CANCELLED_REQUEST_ID }))
-        .at_block_hash(completed_cancelled_callback_block)
+        .at_block_hash(completed_cancelled_callback_block.clone())
         .await?;
     let after_late_callback = after_late_callback.expect("cancelled record should remain");
     assert_eq!(after_late_callback.status, ExecutionStatus::Cancelled);
@@ -798,6 +897,26 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         SignatureStatus::Failed
     );
     assert!(after_late_callback.signature_response.is_none());
+    let late_callback_storage =
+        contract_storage_usage_at(&administrator, completed_cancelled_callback_block).await?;
+    storage_points.push(("late_callback_after_cancel", late_callback_storage));
+    assert_eq!(
+        late_callback_storage, cancelled_storage,
+        "a late callback after cancellation must not grow Hub state"
+    );
+
+    // These are observations, not fixed budgets: protocol/serialization updates may legitimately change the byte totals.
+    eprintln!("NEAR_STORAGE_LIFECYCLE_BYTES:");
+    for (index, (phase, bytes)) in storage_points.iter().enumerate() {
+        let previous = index
+            .checked_sub(1)
+            .map(|previous_index| storage_points[previous_index].1)
+            .unwrap_or(*bytes);
+        eprintln!(
+            "phase={phase} total_bytes={bytes} delta_from_previous_bytes={}",
+            i128::from(*bytes) - i128::from(previous)
+        );
+    }
 
     Ok(())
 }

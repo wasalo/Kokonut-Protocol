@@ -83,6 +83,12 @@ Keep current callback invalidation controls. During a compromise response, pause
 
 The contract currently retains execution and idempotency data without a deposit model or reclamation path. A policy must balance permissionless/operational usability, cost predictability, and replay safety.
 
+### Local prototype measurement (October 25, 2026)
+
+A local-only NEAR sandbox measurement observed 1,288 additional account-storage bytes from the configured baseline through one request's `Issued` state: +850 at proposal, +99 at approval, +78 while signature-pending, and +261 after the mock callback persisted a representative-length response. A second request added 1,037 bytes through its cancelled state; cancellation and its late callback did not reduce or further grow storage. The focused scenario passed four runs with identical values. Full state-by-state measurements and limitations are in [`NEAR Hub Local Storage Measurement`](near-storage-measurement.md).
+
+These are deterministic prototype byte counts, not a network storage-fee quote or a cost/cap recommendation. The fixture covers one project and a small request count; its signature fields have representative lengths but deliberately invalid cryptographic values. The result suggests that cancellation must not be assumed to reclaim retained request storage. It does not select a storage payer, reserve, quota, payload cap, archival approach, or retention period.
+
 ### Funding options
 
 - **Operations-funded reserve:** a governed operations budget funds storage. Simple for approved operators, but requires monitoring, replenishment authority, and a stop condition when reserve is low.
