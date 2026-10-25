@@ -1,13 +1,39 @@
 # Kokonut Protocol — Research-Backed Implementation PRD
 
-**Status:** Implementation-ready product and architecture specification
+**Status:** Active implementation; architecture baseline with prototype-only execution evidence. Not testnet or production readiness.
 **Product owner:** Kokonut Network
 **Research date:** October 15, 2026
+**Implementation status updated:** October 25, 2026
 **Strategic decision:** NEAR Protocol becomes the Web3 interoperability hub for Kokonut Network
 **Canonical operational system:** Kokonut Intelligence / PostgreSQL + PostGIS
 **Initial economic product:** Revenue Containers, validated first through a controlled Majeur/Moloch experiment
 **Initial execution scope:** EVM-first cross-chain deployment and transaction orchestration through NEAR Chain Signatures
 **Audience:** Codex, Kokonut engineers, security reviewers, DAO stakeholders, auditors
+
+## Current implementation status and critical path
+
+**Kokonut Intelligence (KI) is the critical path for end-to-end Protocol delivery.** KI remains the canonical system for farm operations, finance, evidence, and human approvals. Protocol-side prototypes can be tested independently, but they do not complete the product until the KI-owned Protocol schema/approval bridge and integration with KI's durable event system are implemented against the finalized refactor.
+
+### Verified progress as of October 25, 2026
+
+- Protocol development remains on `develop`. The locally committed source/test revision is `c589d400d022d5f892f6fbb333dc675454a856f0`; it has not been pushed. The last verified `origin/develop` ref remains `806b2dafea888dc3a46709d0577572b92f46695e`.
+- Hosted Actions run `40156816567` passed `protocol-ci`, `protocol-near`, `protocol-evm`, and `protocol-secrets` with zero annotations for the earlier `806b2d...` upstream revision—not for the new local commit. Full local `make ci` passed against the tree committed as `c589d40`: 96 Python tests; 68 NEAR unit tests plus 2 local sandbox integrations; 28 Foundry tests; 1 dual-Anvil integration; Slither (0 findings), Semgrep (49 rules, 0 findings), Aderyn (0 high findings), and clean Gitleaks history/worktree scanning and self-test. No hosted run exists for `c589d40` because it was not pushed.
+- The sandbox suite now includes local mock-signature success and cancellation paths: it observes `Pending`, resumes the mock yield, and checks persisted `Issued` state; it also cancels while pending and verifies a late callback cannot replace `Cancelled`/`Failed`. The fixture data is deliberately invalid and is not cryptographic evidence. Sandbox activity and both Anvil endpoints are local-only; no public RPC, real signer, destination-chain broadcast, or deployment occurred.
+- The October 25 advisory recheck is documented in [dependency maintenance](dependency-maintenance.md): the current NEAR lockfile has 3 previously known Rust advisory matches, and Semgrep's current latest release still resolves 2 previously known Python advisory matches. No compatible stable fixes were available; these remain open audit items.
+- Protocol-only evidence also includes the offline EVM factory and invariants, local dual-Anvil adapter exercise, execution/recovery prototypes, and security/provenance CI. None is evidence of public testnet integration, production authority, or deployment.
+
+### KI dependency and sequencing
+
+Repository policy forbids implementing the KI bridge or editing KI migrations while the KI refactor is underway. Resume KI-owned work only after the refactor is finalized **and** Wasabi specifies the KI PR target. Until then, do not invent a migration head, create duplicate farm/accounting/evidence/approval state in Protocol, or claim end-to-end integration complete.
+
+The delivery sequence is therefore dependency-gated:
+
+1. **Clear the KI prerequisite:** KI owner finalizes the refactor; record the exact KI `main` commit and latest PostgreSQL migration, run KI CI, then Wasabi identifies the KI PR target.
+2. **Add the KI-owned Protocol read model:** after that gate, re-check the live schema head and implement additive registry/read-model work and its constraints/tests in KI. Begin read-only; do not add cross-chain writes or a parallel Protocol ledger.
+3. **Integrate execution with canonical KI governance and durability:** connect Protocol requests, human approvals, state transitions, durable-event delivery, recovery, and reconciliation to the existing KI workflow/event system; verify idempotent replay and crash recovery there.
+4. **Close independent Protocol gates:** identify the real EVM component and exact project Safe/DAO before component-specific authority proof; complete independent security, economic, and legal reviews before any eligible pilot; obtain separate explicit authorization before public testnet or live activity.
+
+Some Protocol hardening and isolated tests can continue without KI, but they do not unblock the KI-dependent product acceptance gates. The dated Gantt below is a historical planning target, not a current delivery commitment; re-baseline dates only after step 1 is complete.
 
 ## Executive summary
 
@@ -2114,7 +2140,8 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [x] Implement execution replay protection (request and idempotency-key uniqueness).
 [x] Add pause/emergency controls (administrator-gated pause/unpause).
 [x] Add NEAR unit tests (68 passing).
-[x] Add local-only NEAR sandbox integration tests (pinned sandbox runtime; verifies registry persistence, unauthorized mutation rejection, policy-backed proposal → threshold approval → proposer cancellation, and `NotRequested` signature status; no public-network or live signer activity).
+[x] Add local-only NEAR sandbox integration tests (pinned sandbox runtime; verifies registry persistence, unauthorized mutation rejection, policy-backed proposal → threshold approval → proposer cancellation, plus mock signature `Pending` → `Issued` and cancellation/late-callback invalidation; response fields are deliberately invalid placeholders; no public-network or real signer activity; full local `make ci` passed for local commit `c589d400d022d5f892f6fbb333dc675454a856f0`; hosted run `40156816567` applies only to prior upstream commit `806b2dafea888dc3a46709d0577572b92f46695e`).
+[x] Remediate sandbox test-only Rustls advisory matches with the documented checksum-anchored HTTP-only `near-kit` feature patch; production Wasm remains outside the sandbox TLS client graph.
 
 [x] Implement the testnet-gated NEAR Hub Chain Signatures request/callback path; no live signer client or E2E request is configured.
 [x] Enforce project/chain/purpose-scoped derivation-path policy.
@@ -2179,7 +2206,7 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Governance approval for financial activation.
 ```
 
-Evidence for the checked prototype items: [NEAR Hub execution controller](execution-controller.md), [testnet EVM adapter](evm-adapter.md), [offline factory](evm-factory.md), [recovery runbook](runbook.md), and [offline Revenue Container simulator](revenue-containers.md), together with their source and tests. KI integrations, production components, live operations, audits, and governance/legal approvals remain separate gates.
+Evidence for the checked prototype items: [NEAR Hub execution controller](execution-controller.md), [testnet EVM adapter](evm-adapter.md), [offline factory](evm-factory.md), [recovery runbook](runbook.md), [offline Revenue Container simulator](revenue-containers.md), and [dependency maintenance](dependency-maintenance.md), together with their source and tests. Full local `make ci` passed for local source/test commit `c589d400d022d5f892f6fbb333dc675454a856f0`. Hosted Actions run `40156816567` passed all four jobs with zero annotations for the earlier upstream commit `806b2dafea888dc3a46709d0577572b92f46695e` only; no hosted run exists for the local commit because it has not been pushed. KI integration, production components, live operations, audits, and governance/legal approvals remain separate gates; KI refactor completion and an explicit KI PR target are prerequisites for the KI-dependent work.
 
 The current repository provides a strong implementation starting point rather than a legacy obstacle: the Kernel candidate already demonstrates the two-service architectural direction, durable scheduler/event infrastructure already exists, Gnosis/Baal and Celo/EAS integrations already exist, and ARM64 images have already been built even though native Raspberry Pi certification remains open. citeturn10file0 citeturn16file0 citeturn17file0 citeturn22file0
 The architectural end state is therefore not a larger stack.
