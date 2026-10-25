@@ -451,6 +451,49 @@ mod tests {
     }
 
     #[test]
+    fn bounded_registry_text_fields_accept_maximum_and_reject_one_over() {
+        let max_namespace = "a".repeat(64);
+        let max_chain_id = "1".repeat(128);
+        validate_chain(
+            &ChainReference {
+                namespace: max_namespace.clone(),
+                chain_id: max_chain_id.clone(),
+            },
+            "other",
+            "other",
+        );
+        assert!(std::panic::catch_unwind(|| {
+            validate_chain(
+                &ChainReference {
+                    namespace: format!("{max_namespace}a"),
+                    chain_id: "1".to_owned(),
+                },
+                "other",
+                "other",
+            )
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            validate_chain(
+                &ChainReference {
+                    namespace: "a".to_owned(),
+                    chain_id: format!("{max_chain_id}1"),
+                },
+                "other",
+                "other",
+            )
+        })
+        .is_err());
+
+        assert!(is_valid_signer_address(&"T".repeat(256), "other"));
+        assert!(!is_valid_signer_address(&"T".repeat(257), "other"));
+        assert!(is_valid_policy_version(&format!("p{}", "v".repeat(127))));
+        assert!(!is_valid_policy_version(&format!("p{}", "v".repeat(128))));
+        assert!(is_valid_operation(&format!("a{}", "b".repeat(79))));
+        assert!(!is_valid_operation(&format!("a{}", "b".repeat(80))));
+    }
+
+    #[test]
     fn base_unit_comparison_is_numeric_for_canonical_decimal_strings() {
         assert!(base_units_lte("0", "0"));
         assert!(base_units_lte("9", "10"));
@@ -463,8 +506,12 @@ mod tests {
     fn expiration_parser_accepts_rfc3339_and_rejects_invalid_or_pre_epoch_values() {
         assert!(parse_expires_at_ns("2035-01-01T00:00:00Z").is_some());
         assert!(parse_expires_at_ns("2035-01-01T01:00:00+01:00").is_some());
+        assert!(parse_expires_at_ns("2035-01-01T00:00:00.123456789+00:00").is_some());
         assert!(parse_expires_at_ns("not-a-timestamp").is_none());
         assert!(parse_expires_at_ns("1969-12-31T23:59:59Z").is_none());
+        let over_limit = format!("{}{}", "2035-01-01T00:00:00Z", "0".repeat(45));
+        assert_eq!(over_limit.len(), 65);
+        assert!(parse_expires_at_ns(&over_limit).is_none());
     }
 
     #[test]

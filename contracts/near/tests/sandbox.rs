@@ -905,6 +905,334 @@ async fn deployed_hub_issues_and_persists_mock_chain_signature_callback(
         "a late callback after cancellation must not grow Hub state"
     );
 
+    const BOUNDARY_PROJECT_ID: &str = "00000000-0000-4000-8000-000000000021";
+    const BOUNDARY_REQUEST_IDS: [&str; 3] = [
+        "00000000-0000-4000-8000-000000000022",
+        "00000000-0000-4000-8000-000000000023",
+        "00000000-0000-4000-8000-000000000024",
+    ];
+    let max_namespace = "a".repeat(64);
+    let max_chain_id = "1".repeat(128);
+    let max_operation = format!("a{}", "b".repeat(79));
+    let max_target = "T".repeat(256);
+    let max_policy_version = format!("p{}", "v".repeat(127));
+    let max_uint256 =
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+    let boundary_chain = administrator
+        .call(CONTRACT_ACCOUNT, "register_chain")
+        .args(json!({
+            "namespace": max_namespace.clone(),
+            "chain_id": max_chain_id.clone(),
+            "family": "other",
+            "signing_scheme": "other",
+            "capabilities": {
+                "chain_signatures": false,
+                "contract_deploy": false,
+                "eas": false,
+                "safe": false,
+                "baal": false,
+                "intents_settlement": false
+            },
+            "enabled": true
+        }))
+        .await?;
+    assert!(
+        boundary_chain.is_success(),
+        "maximum chain identifiers register"
+    );
+    let boundary_project = administrator
+        .call(CONTRACT_ACCOUNT, "register_project")
+        .args(json!({
+            "project_id": BOUNDARY_PROJECT_ID,
+            "profile_hash": format!("0x{}", "f".repeat(64)),
+            "approved_chains": [{
+                "namespace": max_namespace.clone(),
+                "chain_id": max_chain_id.clone()
+            }]
+        }))
+        .await?;
+    assert!(boundary_project.is_success());
+    let boundary_policy = administrator
+        .call(CONTRACT_ACCOUNT, "configure_execution_policy")
+        .args(json!({
+            "project_id": BOUNDARY_PROJECT_ID,
+            "namespace": max_namespace.clone(),
+            "chain_id": max_chain_id.clone(),
+            "version": max_policy_version.clone(),
+            "allowed_operations": [max_operation.clone()],
+            "allowed_targets": [max_target.clone()],
+            "max_value_base_units": max_uint256,
+            "operators": [operator.account_id.to_string()],
+            "approvers": [approver.account_id.to_string()],
+            "approval_threshold": 1
+        }))
+        .await?;
+    assert!(boundary_policy.is_success());
+    let boundary_policy_block = boundary_policy
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub maximum-input policy receipt")
+        .block_hash;
+    storage_points.push((
+        "max_input_configured_baseline",
+        contract_storage_usage_at(&administrator, boundary_policy_block).await?,
+    ));
+
+    for (index, (request_id, idempotency_prefix)) in
+        BOUNDARY_REQUEST_IDS.iter().zip(["a", "b", "c"]).enumerate()
+    {
+        let idempotency_key = format!("{idempotency_prefix}{}", "i".repeat(255));
+        let proposed = execution_operator
+            .call(CONTRACT_ACCOUNT, "propose_execution")
+            .args(json!({
+                "request": {
+                    "protocol_version": "1",
+                    "request_id": request_id,
+                    "project_id": BOUNDARY_PROJECT_ID,
+                    "chain_namespace": max_namespace,
+                    "chain_id": max_chain_id,
+                    "operation": max_operation,
+                    "target": max_target,
+                    "value_base_units": max_uint256,
+                    "calldata_hash": format!("0x{}", "a".repeat(64)),
+                    "nonce": max_uint256,
+                    "gas_policy": {
+                        "max_fee": max_uint256,
+                        "max_priority_fee": max_uint256
+                    },
+                    "expires_at": "2099-01-01T00:00:00.123456789+00:00",
+                    "policy_version": max_policy_version,
+                    "idempotency_key": idempotency_key
+                }
+            }))
+            .await?;
+        assert!(
+            proposed.is_success(),
+            "maximum-bounded request {} should persist",
+            index + 1
+        );
+        let request_block = proposed
+            .receipts_outcome
+            .iter()
+            .rev()
+            .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+            .expect("Hub maximum-request receipt")
+            .block_hash;
+        let stored: Option<ExecutionRequestRecord> = execution_operator
+            .view(CONTRACT_ACCOUNT, "get_execution_request")
+            .args(json!({ "request_id": request_id }))
+            .at_block_hash(request_block.clone())
+            .await?;
+        let stored = stored.expect("maximum-bounded request remains retained");
+        assert_eq!(stored.request.chain_namespace.len(), 64);
+        assert_eq!(stored.request.chain_id.len(), 128);
+        assert_eq!(stored.request.operation.len(), 80);
+        assert_eq!(stored.request.target.len(), 256);
+        assert_eq!(stored.request.value_base_units, max_uint256);
+        assert_eq!(stored.request.nonce, max_uint256);
+        assert_eq!(stored.request.gas_policy.max_fee, max_uint256);
+        assert_eq!(stored.request.policy_version.len(), 128);
+        assert_eq!(stored.request.idempotency_key.len(), 256);
+        let phase = match index {
+            0 => "max_request_1_retained",
+            1 => "max_request_2_retained",
+            2 => "max_request_3_retained",
+            _ => unreachable!("fixed boundary request count"),
+        };
+        storage_points.push((
+            phase,
+            contract_storage_usage_at(&administrator, request_block).await?,
+        ));
+    }
+
+    const MAX_SIGNATURE_REQUEST_ID: &str = "00000000-0000-4000-8000-000000000025";
+    let maximum_signature_proposal = execution_operator
+        .call(CONTRACT_ACCOUNT, "propose_execution")
+        .args(json!({
+            "request": {
+                "protocol_version": "1",
+                "request_id": MAX_SIGNATURE_REQUEST_ID,
+                "project_id": PROJECT_ID,
+                "chain_namespace": "eip155",
+                "chain_id": "8453",
+                "operation": "deploy_project_component",
+                "target": TARGET,
+                "value_base_units": "500",
+                "gas_limit": "120000",
+                "calldata_hash": format!("0x{}", "a".repeat(64)),
+                "signing_payload_hash": format!("0x{}", "b".repeat(64)),
+                "signer_key_version": 0,
+                "expected_effect_hash": format!("0x{}", "c".repeat(64)),
+                "nonce": "1",
+                "gas_policy": { "max_fee": "10", "max_priority_fee": "2" },
+                "expires_at": "2099-01-01T00:00:00Z",
+                "policy_version": "policy-v1",
+                "idempotency_key": format!("z{}", "x".repeat(255))
+            }
+        }))
+        .await?;
+    assert!(maximum_signature_proposal.is_success());
+    let maximum_signature_proposal_block = maximum_signature_proposal
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub maximum-signature proposal receipt")
+        .block_hash;
+    let maximum_signature_record: Option<ExecutionRequestRecord> = execution_operator
+        .view(CONTRACT_ACCOUNT, "get_execution_request")
+        .args(json!({ "request_id": MAX_SIGNATURE_REQUEST_ID }))
+        .at_block_hash(maximum_signature_proposal_block.clone())
+        .await?;
+    let maximum_signature_record =
+        maximum_signature_record.expect("maximum-key signature request persists");
+    assert_eq!(maximum_signature_record.request.idempotency_key.len(), 256);
+    storage_points.push((
+        "max_signature_request_awaiting_approval",
+        contract_storage_usage_at(&administrator, maximum_signature_proposal_block).await?,
+    ));
+
+    let maximum_signature_approval = execution_approver
+        .call(CONTRACT_ACCOUNT, "approve_execution")
+        .args(json!({
+            "request_id": MAX_SIGNATURE_REQUEST_ID,
+            "expected_action_hash": maximum_signature_record.action_hash
+        }))
+        .await?;
+    assert!(maximum_signature_approval.is_success());
+    let maximum_signature_approval_block = maximum_signature_approval
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub maximum-signature approval receipt")
+        .block_hash;
+    storage_points.push((
+        "max_signature_request_approved",
+        contract_storage_usage_at(&administrator, maximum_signature_approval_block).await?,
+    ));
+
+    let maximum_signature_request = execution_operator
+        .call(CONTRACT_ACCOUNT, "request_signature")
+        .args(json!({
+            "request_id": MAX_SIGNATURE_REQUEST_ID,
+            "expected_action_hash": maximum_signature_record.action_hash
+        }))
+        .gas("300 Tgas")
+        .deposit(NearToken::from_near(1))
+        .send()
+        .wait_until::<Included>()
+        .await?;
+    let mut maximum_signature_pending_block = None;
+    for _ in 0..20 {
+        let progress = execution_operator
+            .tx_status(
+                &maximum_signature_request.transaction_hash,
+                &maximum_signature_request.sender_id,
+            )
+            .wait_until::<Included>()
+            .await?;
+        if let Some(outcome) = progress.outcome.as_ref() {
+            let signer_block = outcome
+                .receipts_outcome
+                .iter()
+                .rev()
+                .find(|receipt| receipt.outcome.executor_id.as_str() == MOCK_SIGNER_ACCOUNT)
+                .map(|receipt| receipt.block_hash.clone());
+            if let Some(signer_block) = signer_block {
+                let mock_request: Option<Value> = mock_signer_client
+                    .view(MOCK_SIGNER_ACCOUNT, "get_last_request")
+                    .args(json!({}))
+                    .at_block_hash(signer_block)
+                    .await?;
+                if mock_request
+                    .as_ref()
+                    .is_some_and(|request| request["payload"] == json!(vec![0xbbu8; 32]))
+                {
+                    maximum_signature_pending_block = outcome
+                        .receipts_outcome
+                        .iter()
+                        .rev()
+                        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+                        .map(|receipt| receipt.block_hash.clone());
+                    if maximum_signature_pending_block.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        sandbox.fast_forward(1).await?;
+    }
+    let maximum_signature_pending_block = maximum_signature_pending_block
+        .expect("Hub maximum-signature pending receipt should be included");
+    storage_points.push((
+        "max_signature_request_pending",
+        contract_storage_usage_at(&administrator, maximum_signature_pending_block).await?,
+    ));
+
+    let mut maximum_signature: Value = json!({
+        "big_r": { "affine_point": "" },
+        "s": { "scalar": "22" },
+        "recovery_id": 10
+    });
+    let signature_envelope_len = serde_json::to_vec(&maximum_signature)?.len();
+    // NEAR's local yield-resume host rejects payloads above 1,024 bytes.
+    let affine_point_len = 1024usize
+        .checked_sub(signature_envelope_len)
+        .expect("signature JSON envelope is smaller than sandbox yield limit");
+    assert_eq!(affine_point_len % 2, 0);
+    maximum_signature["big_r"]["affine_point"] = Value::String("11".repeat(affine_point_len / 2));
+    assert_eq!(serde_json::to_vec(&maximum_signature)?.len(), 1024);
+    let maximum_signature_resume = mock_signer_client
+        .call(MOCK_SIGNER_ACCOUNT, "resume_signature")
+        .args(json!({ "signature": maximum_signature }))
+        .await?;
+    assert!(
+        maximum_signature_resume.is_success(),
+        "1,024-byte mock callback resume failed: {maximum_signature_resume:?}"
+    );
+    let maximum_signature_completed = execution_operator
+        .tx_status(
+            &maximum_signature_request.transaction_hash,
+            &maximum_signature_request.sender_id,
+        )
+        .wait_until::<Final>()
+        .await?;
+    assert!(maximum_signature_completed.is_success());
+    let maximum_signature_callback_block = maximum_signature_completed
+        .receipts_outcome
+        .iter()
+        .rev()
+        .find(|receipt| receipt.outcome.executor_id.as_str() == CONTRACT_ACCOUNT)
+        .expect("Hub maximum-signature callback receipt")
+        .block_hash;
+    let maximum_signature_issued: Option<ExecutionRequestRecord> = administrator
+        .view(CONTRACT_ACCOUNT, "get_execution_request")
+        .args(json!({ "request_id": MAX_SIGNATURE_REQUEST_ID }))
+        .at_block_hash(maximum_signature_callback_block.clone())
+        .await?;
+    let maximum_signature_issued =
+        maximum_signature_issued.expect("maximum signature response persists");
+    assert_eq!(
+        maximum_signature_issued.signature_status,
+        SignatureStatus::Issued
+    );
+    assert_eq!(
+        maximum_signature_issued
+            .signature_response
+            .as_deref()
+            .expect("maximum callback response is stored")
+            .len(),
+        1024
+    );
+    storage_points.push((
+        "max_signature_response_issued",
+        contract_storage_usage_at(&administrator, maximum_signature_callback_block).await?,
+    ));
+
     // These are observations, not fixed budgets: protocol/serialization updates may legitimately change the byte totals.
     eprintln!("NEAR_STORAGE_LIFECYCLE_BYTES:");
     for (index, (phase, bytes)) in storage_points.iter().enumerate() {

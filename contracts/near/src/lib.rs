@@ -1359,6 +1359,41 @@ mod tests {
         testing_env_with_promise_results(VMContextBuilder::new().build(), result);
     }
 
+    fn signature_response_bytes_with_len(total_len: usize) -> Vec<u8> {
+        let recovery_id = if total_len % 2 == 0 { 10 } else { 100 };
+        let mut response = near_sdk::serde_json::json!({
+            "big_r": { "affine_point": "" },
+            "s": { "scalar": "22" },
+            "recovery_id": recovery_id
+        });
+        let base_len = near_sdk::serde_json::to_vec(&response)
+            .expect("signature response serializes")
+            .len();
+        let affine_point_len = total_len
+            .checked_sub(base_len)
+            .expect("target response length exceeds the JSON envelope");
+        assert_eq!(affine_point_len % 2, 0, "hex field length must be even");
+        response["big_r"]["affine_point"] =
+            near_sdk::serde_json::Value::String("11".repeat(affine_point_len / 2));
+        let bytes = near_sdk::serde_json::to_vec(&response).expect("signature response serializes");
+        assert_eq!(bytes.len(), total_len);
+        bytes
+    }
+
+    fn request_and_run_signature_callback(
+        hub: &mut KokonutProtocolHub,
+        request_id: &str,
+        action_hash: &str,
+        response_bytes: Vec<u8>,
+    ) -> Option<String> {
+        set_predecessor_with_near_deposit("operator.near", 1);
+        hub.request_signature(request_id.to_owned(), action_hash.to_owned())
+            .as_return()
+            .detach();
+        set_callback_promise_result(near_sdk::PromiseResult::Successful(response_bytes));
+        hub.on_signature_result(request_id.to_owned())
+    }
+
     fn initialized_hub() -> KokonutProtocolHub {
         set_predecessor(ADMIN);
         KokonutProtocolHub::new(account(ADMIN))
@@ -2085,6 +2120,124 @@ mod tests {
         assert_eq!(record.signature_status, SignatureStatus::Failed);
         assert!(record.signature_response.is_none());
         assert!(response.is_none());
+    }
+
+    #[test]
+    fn signature_callback_accepts_exact_response_limit_and_rejects_one_byte_over() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c61";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+
+        let response = request_and_run_signature_callback(
+            &mut hub,
+            request_id,
+            &action_hash,
+            signature_response_bytes_with_len(4097),
+        );
+        assert!(response.is_none());
+        let failed = hub.get_execution_request(request_id.to_owned()).unwrap();
+        assert_eq!(failed.signature_status, SignatureStatus::Failed);
+        assert!(failed.signature_response.is_none());
+
+        let response = request_and_run_signature_callback(
+            &mut hub,
+            request_id,
+            &action_hash,
+            signature_response_bytes_with_len(4096),
+        );
+        assert!(response.is_some());
+        let issued = hub.get_execution_request(request_id.to_owned()).unwrap();
+        assert_eq!(issued.signature_status, SignatureStatus::Issued);
+        assert_eq!(issued.signature_response.as_deref().unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn signature_callback_rejects_malformed_and_unbounded_hex_fields() {
+        let mut hub = initialized_hub();
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c63";
+        let action_hash = configure_signing_fixture(&mut hub, request_id);
+        let invalid_responses = [
+            b"not-json".to_vec(),
+            br#"{"big_r":{"affine_point":""},"s":{"scalar":"22"},"recovery_id":0}"#.to_vec(),
+            br#"{"big_r":{"affine_point":"0"},"s":{"scalar":"22"},"recovery_id":0}"#.to_vec(),
+            br#"{"big_r":{"affine_point":"gg"},"s":{"scalar":"22"},"recovery_id":0}"#.to_vec(),
+            br#"{"big_r":{"affine_point":"11"},"s":{"scalar":"22"},"recovery_id":256}"#.to_vec(),
+        ];
+
+        for response_bytes in invalid_responses {
+            let response = request_and_run_signature_callback(
+                &mut hub,
+                request_id,
+                &action_hash,
+                response_bytes,
+            );
+            assert!(response.is_none());
+            let record = hub.get_execution_request(request_id.to_owned()).unwrap();
+            assert_eq!(record.signature_status, SignatureStatus::Failed);
+            assert!(record.signature_response.is_none());
+        }
+    }
+
+    #[test]
+    fn execution_proposal_persists_maximum_bounded_evm_request_fields() {
+        let mut hub = initialized_hub();
+        register_evm_signing_project(&mut hub);
+
+        let max_uint256 =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let max_operation = format!("a{}", "b".repeat(79));
+        let max_policy_version = format!("p{}", "v".repeat(127));
+        hub.configure_execution_policy(
+            PROJECT_ID.to_owned(),
+            "eip155".to_owned(),
+            "84532".to_owned(),
+            max_policy_version.clone(),
+            vec![max_operation.clone()],
+            vec!["0x1234567890abcdef1234567890abcdef12345678".to_owned()],
+            max_uint256.to_owned(),
+            vec![account("operator.near")],
+            vec![account("alice.near"), account("bob.near")],
+            2,
+        );
+
+        let mut request = execution_request(
+            "018f4f7e-10bd-7d98-9b23-9ec89a1d9c64",
+            &"i".repeat(256),
+            "2035-01-01T00:00:00.123456789+00:00",
+        );
+        request.operation = max_operation.clone();
+        request.value_base_units = max_uint256.to_owned();
+        request.gas_limit = Some(max_uint256.to_owned());
+        request.nonce = max_uint256.to_owned();
+        request.gas_policy.max_fee = max_uint256.to_owned();
+        request.gas_policy.max_priority_fee = max_uint256.to_owned();
+        request.policy_version = max_policy_version.clone();
+        set_predecessor("operator.near");
+
+        hub.propose_execution(request.clone());
+
+        let stored = hub
+            .get_execution_request(request.request_id.clone())
+            .expect("maximum bounded request persists");
+        assert_eq!(stored.request, request);
+        assert_eq!(stored.request.operation.len(), 80);
+        assert_eq!(stored.request.policy_version.len(), 128);
+        assert_eq!(stored.request.idempotency_key.len(), 256);
+    }
+
+    #[test]
+    fn execution_proposal_rejects_idempotency_key_one_byte_over_limit() {
+        let mut hub = initialized_hub();
+        registered_project(&mut hub);
+        configure_execution_policy(&mut hub, "policy-v1");
+        set_predecessor("operator.near");
+        let request_id = "018f4f7e-10bd-7d98-9b23-9ec89a1d9c65";
+        let request = execution_request(request_id, &"i".repeat(257), "2035-01-01T00:00:00Z");
+
+        let result = catch_unwind(AssertUnwindSafe(|| hub.propose_execution(request.clone())));
+
+        assert!(result.is_err());
+        assert!(hub.get_execution_request(request.request_id).is_none());
     }
 
     #[test]
