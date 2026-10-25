@@ -76,7 +76,7 @@ jobs:
       - name: Run NEAR checks
         env:
           CARGO_NEAR_DISABLE_UPDATE: "1"
-        run: make lint-near test-near build-near
+        run: make lint-near test-near build-near test-near-sandbox
 
   protocol-evm:
     name: protocol-evm

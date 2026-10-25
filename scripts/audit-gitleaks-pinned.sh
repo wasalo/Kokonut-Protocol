@@ -61,15 +61,17 @@ fi
 python3 "$repo_root/scripts/test-gitleaks-scanner.py" \
   --gitleaks "$scanner" \
   --config "$repo_root/.gitleaks.toml" \
+  --snapshot-helper "$repo_root/scripts/create-gitleaks-worktree-snapshot.py" \
   --temp-dir "$workdir"
 
 scan_report() {
   local mode="$1"
   local report_path="$2"
-  shift 2
+  local scan_target="$3"
+  shift 3
 
   set +e
-  "$scanner" "$mode" "$repo_root" "$@" \
+  "$scanner" "$mode" "$scan_target" "$@" \
     --config "$repo_root/.gitleaks.toml" \
     --redact=100 \
     --no-banner \
@@ -79,7 +81,7 @@ scan_report() {
   local scan_status=$?
   set -e
 
-  python3 - "$report_path" "$scan_status" "$mode" <<'PY'
+  python3 - "$report_path" "$scan_status" "$mode" "$scan_target" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -87,6 +89,7 @@ from pathlib import Path
 report_path = Path(sys.argv[1])
 scan_status = int(sys.argv[2])
 mode = sys.argv[3]
+scan_root = Path(sys.argv[4]).resolve()
 try:
     findings = json.loads(report_path.read_text())
 except (OSError, json.JSONDecodeError):
@@ -94,7 +97,7 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(2)
 
 if scan_status == 0 and not findings:
-    scope = "working tree" if mode == "dir" else "all fetched Git refs"
+    scope = "tracked and non-ignored working-tree files" if mode == "dir" else "all fetched Git refs"
     print(f"Gitleaks {mode} scan: clean across {scope}; secret output redaction enabled.")
     raise SystemExit(0)
 if scan_status == 1 and findings:
@@ -103,6 +106,16 @@ if scan_status == 1 and findings:
         path = str(finding.get("File", "<unknown>"))
         line = finding.get("StartLine", "?")
         rule = str(finding.get("RuleID", "unknown"))
+        candidate = Path(path)
+        if candidate.is_absolute():
+            try:
+                path = candidate.resolve().relative_to(scan_root).as_posix()
+            except (OSError, ValueError):
+                path = candidate.name
+        elif candidate.parts and candidate.parts[0] == scan_root.name:
+            path = Path(*candidate.parts[1:]).as_posix()
+        else:
+            path = candidate.as_posix()
         print(f"- {path}:{line} [{rule}]")
     raise SystemExit(1)
 
@@ -111,5 +124,7 @@ raise SystemExit(scan_status or 2)
 PY
 }
 
-scan_report dir "$workdir/gitleaks-worktree-report.json"
-scan_report git "$workdir/gitleaks-history-report.json" --log-opts=--all
+python3 "$repo_root/scripts/create-gitleaks-worktree-snapshot.py" \
+  "$repo_root" "$workdir/worktree"
+scan_report dir "$workdir/gitleaks-worktree-report.json" "$workdir/worktree"
+scan_report git "$workdir/gitleaks-history-report.json" "$repo_root" --log-opts=--all

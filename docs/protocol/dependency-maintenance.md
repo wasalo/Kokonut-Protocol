@@ -43,6 +43,14 @@ The RustSec records for `crypto-bigint`, `lru`, and `unsafe-libyaml` provide no 
 
 These findings remain open where upstream stable constraints prevent a safe update. A green CI run does not resolve them or satisfy the full audit gate. No public/testnet or production deployment is authorized by this snapshot.
 
+## Addendum — NEAR sandbox test dependency advisories (2026-10-25)
+
+A fresh OSV querybatch compared 278 registry package/version pairs at `origin/develop` with 437 in the sandbox-test lockfile. It returned nine advisory matches across five current package/version pairs. The three existing pairs (`crypto-bigint 0.5.5`, `lru 0.16.4`, and `unsafe-libyaml 0.2.11`) remain as documented above. The newly added test-only graph adds `rustls 0.23.43` (RUSTSEC-2026-0285/0346/0348/0349, plus its GHSA record) and `rustls-webpki 0.103.13` (RUSTSEC-2026-0382).[38][39][40][41][42]
+
+These packages enter through the `near-kit` and `near-sandbox` development dependencies. The NEAR test uses only the sandbox's loopback HTTP RPC endpoint, and `cargo tree --target wasm32-unknown-unknown --edges normal` contains none of the new TLS/test-client packages. This limits runtime exposure; it does not erase the advisory matches or establish a clean dependency audit.
+
+Attempts to move the graph to `rustls 0.23.46` and `rustls-webpki 0.103.16` failed to resolve: the selected TLS features require `aws-lc-rs >=1.18`, while the current stable NEAR stack (`near-sdk 5.29.1` → `near-crypto 0.37.4`) pins `aws-lc-rs =1.16.2`. No incompatible override was forced. Record these test-tool advisories as open dependency debt; resolve them through a compatible stable NEAR/client update or a separately reviewed test-client feature change before any public/testnet deployment. No public deployment is authorized by this addendum.
+
 ## Sources
 
 [5] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
@@ -76,3 +84,8 @@ These findings remain open where upstream stable constraints prevent a safe upda
 [35] https://pypi.org/pypi/eth-keys/json
 [36] https://pypi.org/pypi/rlp/json
 [37] https://crates.io/api/v1/crates/time
+[38] https://rustsec.org/advisories/RUSTSEC-2026-0285.html
+[39] https://rustsec.org/advisories/RUSTSEC-2026-0346.html
+[40] https://rustsec.org/advisories/RUSTSEC-2026-0348.html
+[41] https://rustsec.org/advisories/RUSTSEC-2026-0349.html
+[42] https://rustsec.org/advisories/RUSTSEC-2026-0382.html

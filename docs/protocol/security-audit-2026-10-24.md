@@ -121,6 +121,16 @@ The rules carry Semgrep Rules License v1.0 metadata. That license permits intern
 - All four jobs (`protocol-ci`, `protocol-near`, `protocol-evm`, `protocol-secrets`) passed with zero annotations.[38][39]
 - The report is bounded to repository source, fixtures, local package metadata, and the cited advisories. No live NEAR signer, EVM RPC, public chain, transaction, or deployment was used.
 
+## Verification update — NEAR sandbox test slice (October 25, 2026)
+
+The previously open PRD item `2117` now has local sandbox integration coverage. `make test-near-sandbox` and the complete `make ci` passed on the local VPS. The new test starts a fresh local sandbox with the SHA-256-pinned NEAR sandbox `2.13.4` binary, deploys and initializes the Hub Wasm, verifies administrator chain registration at the transaction's receipt block, confirms a non-administrator mutation is rejected, and confirms the registry remains unchanged at the rejection receipt block. See [`contracts/near/tests/sandbox.rs`](../../contracts/near/tests/sandbox.rs) and [`contracts/near/README.md`](../../contracts/near/README.md).
+
+The integration test uses loopback RPC and sandbox-scoped accounts only. No public RPC, live signer, signature request, destination-chain broadcast, deployment, or production operation was performed. This closes only the local sandbox-test checklist item; it does not validate testnet/mainnet behavior, contract governance, destination-chain security, or release readiness.
+
+Full local validation on October 25 passed: 96 Python tests; 68 NEAR unit tests plus the 1 sandbox integration test; 28 Foundry tests including the invariant campaign; 1 dual-Anvil integration test; and the configured Slither, Semgrep, Aderyn, and Gitleaks checks. The Gitleaks worktree scan covers tracked and non-ignored working-tree files; its full fetched-history scan and synthetic redaction/detection self-test were clean. Hosted CI for the sandbox slice remains pending until this change is pushed and its run is verified.
+
+The sandbox test dependencies add the explicitly documented Rustls/Rustls-WebPKI advisory matches; the available stable NEAR dependency constraints prevented a compatible lockfile-only update. They remain test-only and are not in the normal Wasm dependency graph, but are unresolved dependency debt and remain within the pre-deployment audit gate. See [`docs/protocol/dependency-maintenance.md`](dependency-maintenance.md#addendum--near-sandbox-test-dependency-advisories-2026-10-25). No deployment gate is closed by this local test result.
+
 ## Unchecked PRD item reconciliation (October 24, 2026)
 
 The 47 unchecked PRD items were rechecked; none is invalidated by this source audit. Status is classified by the evidence available in this worktree:

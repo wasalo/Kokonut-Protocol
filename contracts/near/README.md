@@ -37,4 +37,16 @@ cargo test --locked
 cargo near build non-reproducible-wasm --locked --out-dir target/deploy
 ```
 
-The non-reproducible build is for development/CI only; do not deploy it as a production release artifact.
+The non-reproducible build is for development/CI only; do not deploy it as a production release artifact. Plain `cargo test --locked` runs unit tests; the sandbox integration test is a separate opt-in target and is included in `make ci`.
+
+## Local sandbox integration
+
+The integration test deploys the built Wasm to a fresh local `near-sandbox`, initializes it, checks a persisted administrator registry update, and verifies a non-administrator cannot change that state. It uses only loopback RPC and sandbox-scoped test accounts; it does not connect to TestNet/MainNet or call Chain Signatures. The sandbox process and temporary chain state are removed when the test exits.
+
+The test harness versions are exact-pinned in `Cargo.toml` and `Cargo.lock`. The NEAR node binary version is pinned in `.near-sandbox-version`; the Linux x86_64 archive is SHA-256 checked by `scripts/install-near-sandbox-pinned.sh` before extraction. The checksum pins the downloaded bytes, not independent build provenance. This is test-only tooling and does not alter production artifact trust requirements.
+
+Run from the repository root:
+
+```sh
+make test-near-sandbox
+```

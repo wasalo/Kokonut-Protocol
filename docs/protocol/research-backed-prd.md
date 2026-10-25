@@ -2113,8 +2113,8 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [x] Implement Hub policy controls (versioned, scoped execution policy).
 [x] Implement execution replay protection (request and idempotency-key uniqueness).
 [x] Add pause/emergency controls (administrator-gated pause/unpause).
-[x] Add NEAR unit tests (63 passing).
-[ ] Add NEAR sandbox tests (no local/deployed sandbox integration is present).
+[x] Add NEAR unit tests (68 passing).
+[x] Add local-only NEAR sandbox integration tests (pinned sandbox runtime; no public-network or live signer activity).
 
 [x] Implement the testnet-gated NEAR Hub Chain Signatures request/callback path; no live signer client or E2E request is configured.
 [x] Enforce project/chain/purpose-scoped derivation-path policy.

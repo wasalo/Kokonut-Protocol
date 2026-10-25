@@ -9,6 +9,7 @@ from pathlib import Path
 import secrets
 import string
 import subprocess
+import sys
 import tempfile
 
 
@@ -36,6 +37,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gitleaks", required=True)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--snapshot-helper", required=True)
     parser.add_argument("--temp-dir", required=True)
     args = parser.parse_args()
 
@@ -58,11 +60,15 @@ def main() -> int:
             GIT_COMMITTER_EMAIL="secret-scan-test@example.invalid",
         )
         git(repo, env, "init", "--quiet", "--initial-branch=main")
+        (repo / ".gitignore").write_text("target/\n")
+        git(repo, env, "add", ".gitignore")
+        git(repo, env, "commit", "--quiet", "-m", "ignore generated test output")
 
         alphabet = string.ascii_letters + string.digits
         github_token = "ghp_" + "".join(secrets.choice(alphabet) for _ in range(36))
         json_token = "".join(secrets.choice(alphabet) for _ in range(36))
         working_token = "".join(secrets.choice(alphabet) for _ in range(36))
+        ignored_token = "".join(secrets.choice(alphabet) for _ in range(36))
         fixture = {
             "service": "svc",
             "operation": "AuthService.register",
@@ -84,6 +90,9 @@ def main() -> int:
         (repo / "working.json").write_text(
             json.dumps(working_fixture, separators=(",", ":")) + "\n"
         )
+        ignored_path = repo / "target" / "ignored.json"
+        ignored_path.parent.mkdir()
+        ignored_path.write_text(json.dumps({"auth_token": ignored_token}) + "\n")
 
         report = root / "history-report.json"
         scan = subprocess.run(
@@ -108,10 +117,17 @@ def main() -> int:
                 "Gitleaks self-test failed: expected historical GitHub-PAT and supplemental JSON-rule findings"
             )
 
+        snapshot = root / "worktree"
+        subprocess.run(
+            [sys.executable, args.snapshot_helper, str(repo), str(snapshot)],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
         working_report = root / "working-report.json"
         working_scan = subprocess.run(
             [
-                args.gitleaks, "dir", str(repo),
+                args.gitleaks, "dir", str(snapshot),
                 "--config", str(repo / ".gitleaks.toml"),
                 "--redact=100", "--no-banner", "--report-format", "json",
                 "--report-path", str(working_report),
@@ -127,8 +143,16 @@ def main() -> int:
         working_rules = {finding.get("RuleID") for finding in working_findings}
         if working_scan.returncode != 1 or "kokonut-json-credential" not in working_rules:
             raise SystemExit("Gitleaks self-test failed: working-tree JSON credential was not detected")
+        working_paths = {
+            str(finding.get("File", "")).replace("\\\\", "/")
+            for finding in working_findings
+        }
+        if not any(Path(path).name == "working.json" for path in working_paths):
+            raise SystemExit("Gitleaks self-test failed: non-ignored untracked file was not scanned")
+        if any("target/ignored.json" in path for path in working_paths):
+            raise SystemExit("Gitleaks self-test failed: ignored build output was included in the scan")
 
-        tokens = (github_token, json_token, working_token)
+        tokens = (github_token, json_token, working_token, ignored_token)
         rendered = "\n".join(
             (
                 scan.stdout, scan.stderr, report.read_text(),
