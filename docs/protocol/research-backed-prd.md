@@ -21,8 +21,8 @@
 - The sandbox suite now includes local mock-signature success and cancellation paths: it observes `Pending`, resumes the mock yield, and checks persisted `Issued` state; it also cancels while pending and verifies a late callback cannot replace `Cancelled`/`Failed`. The fixture data is deliberately invalid and is not cryptographic evidence. Sandbox activity and both Anvil endpoints are local-only; no public RPC, real signer, destination-chain broadcast, or deployment occurred.
 - The October 25 advisory recheck is documented in [dependency maintenance](dependency-maintenance.md): the current NEAR lockfile has 3 previously known Rust advisory matches, and Semgrep's current latest release still resolves 2 previously known Python advisory matches. No compatible stable fixes were available; these remain open audit items.
 - Protocol-only evidence also includes the offline EVM factory and invariants, local dual-Anvil adapter exercise, execution/recovery prototypes, and security/provenance CI. None is evidence of public testnet integration, production authority, or deployment.
-- **Owner-provided EVM admin-lifecycle clarification (October 25, 2026):** the intended flow is to initialize each destination deployment with the Kokonut EVM Multisig as a temporary bootstrap admin, then transfer administration on that destination chain to the deployment's final project Safe/DAO. This is dynamic per deployment, not a hard-coded permanent admin. Current factory code accepts a per-deployment `projectAdmin` input but leaves it as the recorded admin; it has no generic transfer or handoff-verification step. The actual component, chain-qualified temporary/final addresses, and transfer path remain open gates. See [offline EVM factory](evm-factory.md).
 - **Independent decision-preparation drafts (October 25, 2026):** [NEAR governance decision memo](near-governance-decision-memo.md) and [Revenue Container economic/legal review packet](revenue-container-review-packet.md) are prepared without KI changes. They record choices for owner/governance and counsel; neither is an approved policy, legal opinion, completed review, pilot authorization, nor capital/settlement authorization.
+- **Authority provisioning inventory:** [Open Follow-up](open-follow-up.md) distinguishes the NEAR Hub administrator from the EVM factory's configuration and deployment authority addresses. `ProjectAdmin` remains a per-project deployment input and is intentionally deferred until a project deployment is scoped.
 
 ### KI dependency and sequencing
 
@@ -781,26 +781,20 @@ Do not share one derived EVM signer across every Kokonut project and chain.
 
 ### Destination ownership
 
-The Chain Signature-derived account should preferably act as a **deployment/execution authority**, not permanent sole treasury owner. The product owner's intended two-stage flow is:
+The Chain Signature-derived account should preferably act as a **deployment/execution authority**, not permanent sole treasury owner. The deployment-specific final Project Safe/DAO is supplied as `projectAdmin` when the component is initialized; the factory does not hard-code one ProjectAdmin across all projects.
 
 ```text
 NEAR-derived signer
         │ calls allowlisted factory
         ▼
 Project Factory
-        │ deploys and initializes with
-        │ Kokonut EVM Multisig (temporary admin)
-        ▼
-Temporary Kokonut EVM Multisig
-        │ component-specific destination-chain
-        │ transfer / acceptance transaction
-        ▼
-Deployment-specific final Project Safe / DAO
-        │ read back admin and all authority surfaces;
-        │ verify temporary/factory control is gone
+        │ deploys project contract
+        ├── configure project ID
+        └── initialize with deployment-specific
+            final Project Safe / DAO as ProjectAdmin
 ```
 
-This is a dynamic, per-deployment handoff—not a permanent EVM admin hard-coded into all deployments. The current factory's `projectAdmin` is a per-call argument, but the prototype only sets and verifies the initial admin; it does not implement or prove the later transfer. Exact component/version, network, chain-qualified temporary multisig and final Safe/DAO addresses, their governance, and the transfer/accept path must be established and tested before this checklist item can close. The temporary admin must also remain distinct from the factory configuration and deployment authorities under the current prototype's role-separation rules.
+The `projectAdmin` argument is dynamic per deployment. The factory initializes the component directly with the supplied final controller and verifies the reported initial value and declared authority surfaces. The exact component/version, destination network, and project Safe/DAO are still required for component-specific authority review; this does not make ProjectAdmin a Protocol-wide factory setting.
 
 ### Revenue Container architecture
 
@@ -1616,7 +1610,7 @@ The threat model must therefore be built around execution authority.
 | Destination RPC deception | High | multiple-provider verification for high-value operations |
 | Chain reorg | High | chain-specific finality rules |
 | Destination factory exploit | Critical | allowlisted immutable/audited implementation hashes |
-| Signer remains treasury admin | Critical | transfer permanent admin to project Safe/DAO |
+| Signer remains treasury admin | Critical | Initialize permanent project administration directly to the project Safe/DAO; never make the signer the permanent treasury admin |
 | Cross-project treasury leakage | Critical | isolated accounts/contracts and accounting |
 | Revenue oracle/accounting fraud | Critical | actual bank/chain receipt reconciliation + human finance review |
 | Double distribution | Critical | database and contract invariants |
@@ -2165,12 +2159,11 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [ ] Verify no attestation double counting in the KI integration (deferred with KI work).
 
 [x] Build and test offline EVM project factory prototype (not production deployment).
-[ ] Implement and verify the temporary-to-final destination-admin handoff (blocked until a real component and exact chain-qualified targets are identified).
-  - [ ] Pin the component source/version and network/deployment configuration.
-  - [ ] Identify the temporary Kokonut EVM Multisig address on each destination chain, its governance, and its separation from factory configuration/deployment authorities.
-  - [ ] Identify the deployment-specific final Project Safe/DAO and validate owners, threshold, modules/guards, fallback handler, and governance policy.
-  - [ ] Trace every privileged path, including initializer/reinitializer, transfer/acceptance, roles, inherited controls, proxy/beacon/implementation/admin, upgrade, and delegatecall; prove the manifest is complete.
-  - [ ] Test the real component's temporary-to-final transfer and component-specific invariants; read back every controller and confirm no temporary, Protocol, or factory authority retains control.
+[ ] Set and verify each deployment's final ProjectAdmin at component initialization (blocked until a real component and intended project Safe/DAO are identified).
+  - [ ] Pin the exact component source/version and intended network/deployment configuration.
+  - [ ] Identify the project-specific Safe/DAO address and validate its owners, threshold, modules/guards, fallback handler, and governance policy.
+  - [ ] Trace every privileged path, including initializer/reinitializer, roles, inherited controls, proxy/beacon/implementation/admin, upgrade, and delegatecall; prove the manifest is complete.
+  - [ ] Test the real component's ProjectAdmin assignment and component-specific invariants; confirm no factory authority can retain control.
 [x] Add Foundry fuzz tests for the offline factory prototype.
 [x] Add handler-driven Foundry invariant tests for the offline factory prototype (32 runs, depth 32; fixture-only evidence, not production readiness).
 [ ] Add production component-specific Foundry invariant tests before production readiness.

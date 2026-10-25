@@ -166,7 +166,6 @@ The checklist is intentionally broad. Counsel determines which topics apply, whi
 - Define conflict disclosures, related-party transactions, reserve use, emergency holds, and appeal process.
 - Decide who may amend the waterfall and whether changes apply prospectively only.
 - Define insolvency, operator exit, project closure, and residual-asset treatment.
-- Require read-back verification of destination-chain ownership after the intended bootstrap-admin handoff: the owner has clarified the intended sequence as Kokonut EVM Multisig temporary admin followed by transfer to the deployment's final project Safe/DAO. The current factory prototype does not implement or verify that generic transfer; no capital or rights should rely on the handoff until a real component-specific path and exact addresses are tested.
 
 ## 8. Review sequence and stop conditions
 
@@ -174,8 +173,8 @@ The checklist is intentionally broad. Counsel determines which topics apply, whi
 2. **Economic review:** reconcile historical inputs, complete cost/liability/reserve rules, and test downside cases. No invented percentages or forecast-as-fact.
 3. **Legal review:** counsel supplies the jurisdiction map, characterization, required entity/terms/disclosures, and written conditions. This packet is not that review.
 4. **Governance:** approve instrument, treasury, waterfall, policy-change, dispute, and wind-down rules.
-5. **Technical/security:** review exact contracts/configuration, authority handoff, treasury protections, and independent test/audit scope.
-6. **Separate authorization:** only after all required reviews may a separately authorized pilot be considered. This packet grants no authority to deploy, solicit, receive funds, issue rights, or settle.
+5. **Technical/security:** review exact contracts/configuration, authority assignment and control, treasury protections, and independent test/audit scope.
+6. **Separate authorization** — only after all required reviews may a separately authorized pilot be considered. This packet grants no authority to deploy, solicit, receive funds, issue rights, or settle.
 
 Stop if jurisdictions, source revenue, participant rights, the project treasury, final controller, or accounting evidence are unknown; if marketing implies guaranteed returns or verified ecological outcomes without substantiation; if the proposed rights cannot be described in plain language; or if the proposed design exposes the existing Kokonut DAO treasury by default.
 

@@ -17,19 +17,7 @@
 
 ## Explicit limits
 
-## Owner-provided destination-admin lifecycle — design intent, not implemented
-
-Wasabi has clarified the intended deployment sequence: initialize each destination component with the Kokonut EVM Multisig as a **temporary bootstrap admin**, then use a component-specific transaction on that destination chain to transfer administration to that deployment's final project Safe/DAO. The temporary and final admin are per-deployment/network configuration, not a single hard-coded permanent address.
-
-The current factory only accepts a per-deployment `projectAdmin`, initializes the component to that address, and verifies the initial reported value and authority manifest. It does not execute, observe, or prove a later ownership transfer. Therefore the two-stage handoff is not yet implemented or tested, and the current prototype's manifest checks are only checks of the declared initial surfaces. Do not count the handoff complete until the exact component supports the intended transfer, its acceptance semantics and every privileged surface have been reviewed, and the final controller is read back on the destination chain.
-
-Under the current prototype's role-separation rule, the temporary `projectAdmin` must differ from both factory authorities. If the same Kokonut EVM Multisig is also intended to be the factory's `deploymentAuthority` or `configurationAuthority`, the current prototype rejects that arrangement; resolve the role split explicitly rather than weakening it by assumption.
-
-For each deployment, the future evidence record should bind the chain ID, component/source/version and creation-code hash, temporary multisig address and governance, final Safe/DAO address and governance, transfer/accept transaction, final `projectAdmin` read-back, and verification that no temporary or factory authority remains. No exact component, address, network configuration, transfer method, or deployment is selected by this note.
-
-## Explicit limits
-
-This is development/test code, not a production factory, security audit, or deployment approval. Creation-code allowlisting is only as trustworthy as the authority that approves the hash. The prototype does not validate the component's source, governance semantics, vulnerabilities, project-specific authorization payload, or legal/economic rights. It also cannot inspect a project Safe/DAO's owners, threshold, modules, or upgrade/admin semantics; separately review those and confirm that the selected component makes project control durable before any deployment. A production design still needs reviewed binding between the human-approved NEAR request and all factory calldata, an appropriately governed configuration authority, audited component implementations, destination-chain controls, a tested temporary-to-final-admin handoff, and independent contract review.
+This is development/test code, not a production factory, security audit, or deployment approval. Creation-code allowlisting is only as trustworthy as the authority that approves the hash. The prototype does not validate the component's source, governance semantics, vulnerabilities, project-specific authorization payload, or legal/economic rights. It also cannot inspect a project Safe/DAO's owners, threshold, modules, or upgrade/admin semantics; separately review those and confirm that the selected component makes project control durable before any deployment. A production design still needs reviewed binding between the human-approved NEAR request and all factory calldata, an appropriately governed configuration authority, audited component implementations, destination-chain controls, and independent contract review.
 
 The Foundry, Slither, and Aderyn tool versions are pinned under `contracts/evm/`; the Aderyn Linux archive is checksum-verified. Run from the repository root:
 
