@@ -1776,6 +1776,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-chain-signatures"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "module-lattice"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

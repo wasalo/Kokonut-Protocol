@@ -36,3 +36,8 @@ overflow-checks = true
 
 [patch.crates-io]
 near-kit = { path = "vendor/near-kit" }
+
+[workspace]
+resolver = "2"
+members = ["tests/fixtures/mock-chain-signatures"]
+default-members = ["."]

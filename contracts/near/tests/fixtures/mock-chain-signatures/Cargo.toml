@@ -1,0 +1,13 @@
+[package]
+name = "mock-chain-signatures"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { version = "=5.29.1", default-features = false }

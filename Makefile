@@ -2,7 +2,7 @@ PYTHON ?= python3
 SEMGREP ?= semgrep
 GITLEAKS ?=
 
-.PHONY: lint test lint-near test-near build-near install-near-sandbox test-near-sandbox lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep audit-secrets ci
+.PHONY: lint test lint-near test-near build-near build-near-mock-signer install-near-sandbox test-near-sandbox lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep audit-secrets ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -20,11 +20,14 @@ test-near:
 build-near:
 	cd contracts/near && cargo near build non-reproducible-wasm --locked --out-dir target/deploy
 
+build-near-mock-signer:
+	cd contracts/near && cargo near build non-reproducible-wasm --locked --no-abi --manifest-path tests/fixtures/mock-chain-signatures/Cargo.toml --out-dir target/test-fixtures
+
 install-near-sandbox:
 	bash scripts/install-near-sandbox-pinned.sh
 
-test-near-sandbox: build-near install-near-sandbox
-	cd contracts/near && NEAR_SANDBOX_BIN_PATH="$(CURDIR)/contracts/near/target/ci-tools/near-sandbox" cargo test --locked --features sandbox-tests --test sandbox
+test-near-sandbox: build-near build-near-mock-signer install-near-sandbox
+	cd contracts/near && NEAR_SANDBOX_BIN_PATH="$(CURDIR)/contracts/near/target/ci-tools/near-sandbox" MOCK_CHAIN_SIGNATURE_WASM_PATH="$(CURDIR)/contracts/near/target/test-fixtures/mock_chain_signatures.wasm" cargo test --locked --features sandbox-tests --test sandbox
 
 lint-evm:
 	cd contracts/evm && forge fmt --check && forge build --sizes

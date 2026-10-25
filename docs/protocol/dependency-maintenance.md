@@ -59,6 +59,18 @@ The sandbox tool's remaining TLS path is `near-sandbox 0.3.16 → ureq 3.4.2 →
 
 `make test-near-sandbox` and the complete local `make ci` passed on October 25 with the patched dependency graph. Full CI included 96 Python tests; 68 NEAR unit tests plus 1 sandbox integration test; 28 Foundry tests; 1 dual-Anvil integration test; Slither (0 findings), Semgrep (49 rules, 0 findings), Aderyn (0 high findings), and a clean Gitleaks worktree/history scan and self-test. Hosted Actions run `40155706229` for this dependency-remediation revision completed successfully; all four expected jobs passed with zero annotations. The three retained Rust advisories and Semgrep's two Python dependency advisories remain separate full-audit items; this scoped sandbox-tool remediation does not satisfy the complete predeployment security gate. No live signer, public RPC, broadcast, or deployment was used.
 
+## Current advisory recheck — 2026-10-25
+
+A fresh OSV `querybatch` against the current `contracts/near/Cargo.lock` covered 395 crates.io package/version pairs and returned three matches, all previously known: `crypto-bigint 0.5.5` (`RUSTSEC-2026-0387`), `lru 0.16.4` (`RUSTSEC-2026-0253`), and `unsafe-libyaml 0.2.11` (`RUSTSEC-2024-0449`).[45][46][47] The normal `wasm32-unknown-unknown` dependency graph contains none of these packages; they remain in the host/unit-test graph.
+
+- `crypto-bigint 0.5.5` is reached through `near-vm-runner 0.37.4 → p256 0.13.2 → elliptic-curve 0.13.8`. OSV lists `0.7.6` as fixed, but `elliptic-curve 0.13.8` requires `crypto-bigint =0.5`; a forced major-version override is incompatible and was not attempted.[45]
+- `lru 0.16.4` is required by `near-vm-runner 0.37.4` with the `0.16.3` semver line; OSV lists `0.18.2` as fixed, which is outside that line.[46]
+- `unsafe-libyaml 0.2.11` is pulled through `near-parameters 0.37.4 → serde_yaml 0.9`. The OSV record is an unmaintained-package notice and lists no fixed release; no dependency override was made.[47]
+
+PyPI still reports Semgrep `1.182.1` as its latest release on this check. Its published metadata retains `mcp==1.29.0` and `opentelemetry-api~=1.37.0`.[48][49] Fresh OSV records show the MCP advisory fixed at `1.30.0` and the OpenTelemetry advisory fixed at `1.45.1`; those versions do not satisfy Semgrep's exact/range requirements. Semgrep runs in an isolated scanner environment and its CI job does not start an MCP or telemetry service, but the installed packages remain advisory matches. No safe compatible Semgrep release was available, so no Python dependency change was made.[48][49][50][51]
+
+This is a package-pair recheck, not a full dependency audit. The Python environment is resolved at install time from Semgrep metadata; the repository does not have a tracked Python lockfile. Keep these matches open for upstream-compatible updates and the independent review. No live activity or deployment is authorized by this update.
+
 ## Sources
 
 [5] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
@@ -99,3 +111,10 @@ The sandbox tool's remaining TLS path is `near-sandbox 0.3.16 → ureq 3.4.2 →
 [42] https://rustsec.org/advisories/RUSTSEC-2026-0382.html
 [43] https://crates.io/api/v1/crates/near-kit/0.19.0
 [44] https://github.com/wasalo/Kokonut-Protocol/actions/runs/40151976435
+[45] https://api.osv.dev/v1/vulns/RUSTSEC-2026-0387
+[46] https://api.osv.dev/v1/vulns/RUSTSEC-2026-0253
+[47] https://api.osv.dev/v1/vulns/RUSTSEC-2024-0449
+[48] https://pypi.org/pypi/semgrep/1.182.1/json
+[49] https://pypi.org/pypi/semgrep/json
+[50] https://api.osv.dev/v1/vulns/GHSA-84m7-p3x7-pcfv
+[51] https://api.osv.dev/v1/vulns/GHSA-xcq7-p3pf-p88h
