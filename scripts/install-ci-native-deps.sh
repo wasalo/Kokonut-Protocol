@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Reproducible Linux native prerequisites for cargo-near and Foundry builds.
 # The timestamped Debian snapshot freezes the transitive package index too.
-snapshot="20261023T000000Z"
+snapshot="20261112T000000Z"
 
 python3 - "$snapshot" <<'PY'
 from pathlib import Path

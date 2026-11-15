@@ -1,0 +1,126 @@
+[package]
+name = "symbolic-debuginfo"
+version = "13.9.0"
+license = "MIT"
+authors = [
+    "Armin Ronacher <armin.ronacher@active-4.com>",
+    "Jan Michael Auer <mail@jauer.org>",
+]
+documentation = "https://docs.rs/symbolic-debuginfo"
+homepage = "https://github.com/getsentry/symbolic"
+repository = "https://github.com/getsentry/symbolic"
+description = """
+A library to inspect and load DWARF debugging information from binaries, such
+as Mach-O or ELF.
+"""
+edition.workspace = true
+rust-version.workspace = true
+
+exclude = ["tests/**/*"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = [
+    "breakpad",
+    "elf",
+    "macho",
+    "ms",
+    "ppdb",
+    "sourcebundle",
+    "js",
+    "wasm",
+]
+# Breakpad text format parsing and processing
+breakpad = ["nom", "nom-supreme", "regex"]
+# DWARF processing.
+dwarf = ["gimli", "once_cell"]
+# ELF reading
+elf = [
+    "dwarf",
+    "flate2",
+    "goblin/endian_fd",
+    "goblin/elf32",
+    "goblin/elf64",
+    "goblin/std",
+    "scroll",
+]
+# Mach-o processing
+macho = [
+    "dwarf",
+    "elementtree",
+    "goblin/mach32",
+    "goblin/mach64",
+    "goblin/std",
+    "scroll",
+    "smallvec",
+]
+# PDB/PE processing
+ms = [
+    "elsa",
+    "flate2",
+    "goblin/pe32",
+    "goblin/pe64",
+    "goblin/std",
+    "parking_lot",
+    "pdb-addr2line",
+    "scroll",
+    "smallvec",
+    "srcsrv",
+]
+ppdb = ["symbolic-ppdb"]
+# Source bundle creation
+sourcebundle = [
+    "parking_lot",
+    "regex",
+    "serde_json",
+    "zip",
+    "js",
+    "debugid/serde",
+]
+# JavaScript stuff
+js = ["dep:memchr"]
+# WASM processing
+wasm = ["dwarf", "wasmparser"]
+
+[dependencies]
+debugid = { workspace = true }
+elementtree = { workspace = true, optional = true }
+elsa = { workspace = true, optional = true }
+fallible-iterator = { workspace = true }
+flate2 = { workspace = true, optional = true }
+gimli = { workspace = true, optional = true }
+goblin = { workspace = true, optional = true }
+memchr = { workspace = true, optional = true }
+once_cell = { workspace = true, optional = true }
+nom = { workspace = true, optional = true }
+nom-supreme = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+pdb-addr2line = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+scroll = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+smallvec = { workspace = true, optional = true }
+srcsrv = { version = "0.2", optional = true }
+symbolic-common = { version = "13.9.0", path = "../symbolic-common" }
+symbolic-ppdb = { version = "13.9.0", path = "../symbolic-ppdb", optional = true }
+thiserror = { workspace = true }
+wasmparser = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+
+zstd = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+insta = { workspace = true }
+proptest = {workspace = true }
+tempfile = { workspace = true }
+similar-asserts = { workspace = true }
+symbolic-testutils = { path = "../symbolic-testutils" }
+
+[[bench]]
+name = "breakpad_parser"
+harness = false
+required-features = ["breakpad"]

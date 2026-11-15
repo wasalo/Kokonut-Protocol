@@ -18,13 +18,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - run: python -m pip install "pip==$(< .pip-version)"
       - run: python -m pip install -r requirements-dev.txt
       - run: make lint test
 
   protocol-near:
     name: protocol-near
     runs-on: ubuntu-26.04
-    container: rust@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
+    container: rust@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,13 +63,82 @@ jobs:
             https://github.com/near/cargo-near.git "$source_dir"
           test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_commit"
           printf 'cargo-near source commit: %s\n' "$source_commit"
-          rustc +1.99.1 --version
+          vendor_dir="$GITHUB_WORKSPACE/contracts/near/vendor/symbolic-debuginfo"
+          vendor_archive="$RUNNER_TEMP/symbolic-debuginfo-13.9.0.crate"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://static.crates.io/crates/symbolic-debuginfo/symbolic-debuginfo-13.9.0.crate \
+            -o "$vendor_archive"
+          python3 scripts/verify-vendored-symbolic-debuginfo.py "$vendor_archive" "$vendor_dir"
+          self_update_archive="$RUNNER_TEMP/self_update-0.42.0.crate"
+          self_update_dir="$GITHUB_WORKSPACE/contracts/near/vendor/self_update"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://static.crates.io/crates/self_update/self_update-0.42.0.crate \
+            -o "$self_update_archive"
+          python3 scripts/verify-vendored-self-update.py "$self_update_archive" "$self_update_dir"
+          mkdir -p "$source_dir/vendor"
+          cp -a "$vendor_dir" "$source_dir/vendor/symbolic-debuginfo"
+          cp -a "$self_update_dir" "$source_dir/vendor/self_update"
+          lock_patch="$GITHUB_WORKSPACE/contracts/near/patches/cargo-near-v0.23.0-security-dependency-refresh.patch"
+          git -C "$source_dir" apply --check "$lock_patch"
+          git -C "$source_dir" apply "$lock_patch"
+          python3 - "$source_dir/Cargo.lock" "$source_dir/Cargo.toml" "$source_dir/cargo-near-build/Cargo.toml" "$source_dir/vendor/symbolic-debuginfo/Cargo.toml" "$source_dir/vendor/self_update/Cargo.toml" <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          lock = tomllib.loads(Path(sys.argv[1]).read_text())
+          workspace = tomllib.loads(Path(sys.argv[2]).read_text())
+          build_manifest = tomllib.loads(Path(sys.argv[3]).read_text())
+          symbolic_manifest = tomllib.loads(Path(sys.argv[4]).read_text())
+          self_update_manifest = tomllib.loads(Path(sys.argv[5]).read_text())
+          zip_versions = sorted(package["version"] for package in lock["package"] if package["name"] == "zip")
+          if zip_versions != ["9.6.0"]:
+              raise SystemExit(f"cargo-near ZIP lock is not patched: {zip_versions}")
+          quick_xml_versions = sorted(set(package["version"] for package in lock["package"] if package["name"] == "quick-xml"))
+          if not quick_xml_versions or any(tuple(map(int, version.split("."))) < (0, 41, 0) for version in quick_xml_versions):
+              raise SystemExit(f"cargo-near quick-xml lock still includes an affected release: {quick_xml_versions}")
+          symbolic = next(package for package in lock["package"] if package["name"] == "symbolic-debuginfo")
+          if symbolic.get("source") is not None or symbolic["version"] != "13.9.0":
+              raise SystemExit("cargo-near symbolic-debuginfo is not resolved from the reviewed vendor")
+          self_update = next(package for package in lock["package"] if package["name"] == "self_update")
+          if self_update.get("source") is not None or self_update["version"] != "0.42.0":
+              raise SystemExit("cargo-near self_update is not resolved from the reviewed vendor")
+          patches = workspace.get("patch", {}).get("crates-io", {})
+          if patches.get("symbolic-debuginfo") != {"path": "vendor/symbolic-debuginfo"}:
+              raise SystemExit("cargo-near symbolic-debuginfo vendor path differs from the reviewed patch")
+          if patches.get("self_update") != {"path": "vendor/self_update"}:
+              raise SystemExit("cargo-near self_update vendor path differs from the reviewed patch")
+          dependency = build_manifest["dependencies"]["symbolic-debuginfo"]
+          if dependency.get("version") != "13.9" or dependency.get("optional") is not True:
+              raise SystemExit("cargo-near symbolic-debuginfo dependency differs from the reviewed pin")
+          if build_manifest["dependencies"]["git2"].get("version") != "0.21":
+              raise SystemExit("cargo-near build dependency git2 is not on the reviewed fixed line")
+          if symbolic_manifest["dependencies"]["zip"].get("version") != "9.6.0":
+              raise SystemExit("vendored symbolic-debuginfo does not require ZIP 9.6.0")
+          if self_update_manifest["dependencies"]["quick-xml"].get("version") != "0.41.0":
+              raise SystemExit("vendored self_update does not require quick-xml 0.41.0")
+          print("cargo-near lock patch verified: quick-xml 0.41+, self_update 0.42.0, symbolic-debuginfo 13.9.0, ZIP 9.6.0")
+          PY
+          rustc +1.100.0 --version
           target_dir="$RUNNER_TEMP/cargo-near-target"
           tool_dir="$RUNNER_TEMP/cargo-near/bin"
           mkdir -p "$tool_dir"
           (cd "$source_dir" && CARGO_TARGET_DIR="$target_dir" \
-            cargo +1.99.1 build --locked --release --package cargo-near)
+            cargo +1.100.0 build --locked --release --package cargo-near)
           test -x "$target_dir/release/cargo-near"
+          test_workspace="$RUNNER_TEMP/self-update-test"
+          mkdir -p "$test_workspace"
+          cp -a "$source_dir/vendor/self_update" "$test_workspace/self_update"
+          cp "$source_dir/Cargo.lock" "$test_workspace/Cargo.lock"
+          cat > "$test_workspace/Cargo.toml" <<'TOML'
+          [workspace]
+          resolver = "3"
+          members = ["self_update"]
+          TOML
+          (cd "$test_workspace" && CARGO_TARGET_DIR="$target_dir" cargo +1.100.0 test --release --offline \
+            --manifest-path self_update/Cargo.toml --lib \
+            --no-default-features --features archive-tar,compression-flate2)
+          rm -rf -- "$test_workspace"
           install -m 0755 "$target_dir/release/cargo-near" "$tool_dir/cargo-near"
           test "$("$tool_dir/cargo-near" --version)" = "cargo-near $version"
           rm -rf -- "$target_dir" "$source_dir"
@@ -115,6 +185,63 @@ jobs:
             https://github.com/foundry-rs/foundry.git "$source_dir"
           test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_commit"
           printf 'Foundry source commit: %s\n' "$source_commit"
+          parser_archive="$RUNNER_TEMP/email-address-parser-2.0.2.crate"
+          parser_dir="$GITHUB_WORKSPACE/contracts/evm/vendor/email-address-parser"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://static.crates.io/crates/email-address-parser/email-address-parser-2.0.2.crate \
+            -o "$parser_archive"
+          python3 scripts/verify-vendored-email-address-parser.py "$parser_archive" "$parser_dir"
+          mkdir -p "$source_dir/vendor"
+          cp -a "$parser_dir" "$source_dir/vendor/email-address-parser"
+          lock_patch="$GITHUB_WORKSPACE/contracts/evm/patches/foundry-v1.9.0-security-dependency-refresh.patch"
+          git -C "$source_dir" apply --check "$lock_patch"
+          git -C "$source_dir" apply "$lock_patch"
+          python3 - "$source_dir/Cargo.lock" "$source_dir/Cargo.toml" "$source_dir/vendor/email-address-parser/Cargo.toml" <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          lock = tomllib.loads(Path(sys.argv[1]).read_text())
+          manifest = tomllib.loads(Path(sys.argv[2]).read_text())
+          parser_manifest = tomllib.loads(Path(sys.argv[3]).read_text())
+          versions = {p["version"] for p in lock["package"] if p["name"] == "zip"}
+          if versions != {"9.6.0"}:
+              raise SystemExit(f"Foundry zip lock is not patched: {sorted(versions)}")
+          codec_versions = {p["version"] for p in lock["package"] if p["name"] == "commonware-codec"}
+          codec_macro_versions = {p["version"] for p in lock["package"] if p["name"] == "commonware-codec-macros"}
+          if codec_versions != {"2026.9.0"} or codec_macro_versions != codec_versions:
+              raise SystemExit(f"Foundry Commonware codec and macro versions differ: codec={sorted(codec_versions)}, macros={sorted(codec_macro_versions)}")
+          quick_xml_versions = sorted(set(p["version"] for p in lock["package"] if p["name"] == "quick-xml"))
+          if not quick_xml_versions or any(tuple(map(int, version.split("."))) < (0, 41, 0) for version in quick_xml_versions):
+              raise SystemExit(f"Foundry quick-xml lock still includes an affected release: {quick_xml_versions}")
+          parser = next(p for p in lock["package"] if p["name"] == "email-address-parser")
+          if parser.get("source") is not None or parser["version"] != "2.0.2":
+              raise SystemExit("Foundry email-address-parser is not resolved from the reviewed vendor")
+          if manifest.get("patch", {}).get("crates-io", {}).get("email-address-parser") != {"path": "vendor/email-address-parser"}:
+              raise SystemExit("Foundry email-address-parser vendor path differs from the reviewed patch")
+          if parser_manifest["build-dependencies"]["quick-xml"].get("version") != "=0.41.0":
+              raise SystemExit("vendored email-address-parser does not require quick-xml 0.41.0")
+          revisions = [manifest["workspace"]["dependencies"][name].get("rev") for name in ("alloy-transport-mpp", "mpp")]
+          if revisions != ["fa567a699a70f58fd6852630db332f5443cef068"] * 2:
+              raise SystemExit(f"Foundry MPP source does not use the reviewed commit: {revisions}")
+          rusqlite = {p["version"] for p in lock["package"] if p["name"] == "rusqlite"}
+          sqlite = {p["version"] for p in lock["package"] if p["name"] == "libsqlite3-sys"}
+          if "0.41.1" not in rusqlite or "0.39.1" not in sqlite or "0.36.0" in sqlite:
+              raise SystemExit(f"Foundry SQLite dependency lock is not patched: rusqlite={sorted(rusqlite)}, libsqlite3-sys={sorted(sqlite)}")
+          alloy_trie = {p["version"] for p in lock["package"] if p["name"] == "alloy-trie"}
+          if alloy_trie != {"0.9.8"}:
+              raise SystemExit(f"Foundry Alloy trie does not match the pinned Reth API: {sorted(alloy_trie)}")
+          zstd_013 = [tuple(map(int, p["version"].split("."))) for p in lock["package"] if p["name"] == "zstd" and p["version"].startswith("0.13.")]
+          if not zstd_013 or min(zstd_013) < (0, 13, 4):
+              raise SystemExit(f"Foundry zstd lock still includes an affected 0.13 release: {zstd_013}")
+          zstd_safe_7 = [tuple(map(int, p["version"].split("."))) for p in lock["package"] if p["name"] == "zstd-safe" and p["version"].startswith("7.")]
+          if not zstd_safe_7 or min(zstd_safe_7) < (7, 4, 0):
+              raise SystemExit(f"Foundry zstd-safe lock still includes an affected 7.x release: {zstd_safe_7}")
+          rustix = {p["version"] for p in lock["package"] if p["name"] == "rustix"}
+          if "1.1.5" in rustix or "1.1.6" not in rustix:
+              raise SystemExit(f"Foundry rustix lock is not patched: {sorted(rustix)}")
+          print("Foundry lock patch verified: Commonware/Alloy alignment, quick-xml 0.41+, fixed SQLite and zstd/rustix, reviewed MPP commit, ZIP 9.6.0")
+          PY
           target_dir="$RUNNER_TEMP/foundry-target"
           cargo_home="$RUNNER_TEMP/foundry-cargo-home"
           install_dir="$RUNNER_TEMP/foundry/bin"
@@ -132,12 +259,12 @@ jobs:
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_PROFILE_DEV_DEBUG=0 \
             -e TAG_NAME="v${version}" \
-            rust@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc \
+            rust@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31 \
             bash -c 'set -euo pipefail
               bash /install-ci-native-deps.sh
               git config --global --add safe.directory /src
-              rustc +1.99.1 --version
-              cargo +1.99.1 build --locked --bin forge --bin anvil
+              rustc +1.100.0 --version
+              cargo +1.100.0 build --locked --bin forge --bin anvil
               test -x /target/debug/forge
               test -x /target/debug/anvil
               install -m 0755 /target/debug/forge /output/forge
@@ -156,25 +283,18 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - run: python -m pip install "pip==$(< .pip-version)"
       - run: python -m pip install -r requirements-dev.txt "slither-analyzer==$(< contracts/evm/.slither-version)"
       - name: Install Semgrep in an isolated environment
         run: |
           semgrep_env="$RUNNER_TEMP/semgrep-venv"
           python -m venv "$semgrep_env"
+          "$semgrep_env/bin/python" -m pip install "pip==$(< .pip-version)"
           "$semgrep_env/bin/python" -m pip install "semgrep==$(< contracts/evm/.semgrep-version)"
-      - name: Install checksum-verified Aderyn
-        run: |
-          version="$(tr -d '\r\n' < contracts/evm/.aderyn-version)"
-          archive="aderyn-x86_64-unknown-linux-gnu.tar.xz"
-          curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/Cyfrin/aderyn/releases/download/aderyn-v${version}/${archive}" -o "$RUNNER_TEMP/${archive}"
-          checksum="$(tr -d '\r\n' < contracts/evm/.aderyn-linux-x86_64-sha256)"
-          echo "$checksum  $RUNNER_TEMP/${archive}" | sha256sum --check
-          tar -xJf "$RUNNER_TEMP/${archive}" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/aderyn-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
       - name: Run EVM checks and security scans
         env:
           SEMGREP: ${{ runner.temp }}/semgrep-venv/bin/semgrep
-        run: make lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-aderyn
+        run: make lint-evm test-evm test-evm-anvil audit-evm audit-semgrep
 
   protocol-secrets:
     name: protocol-secrets

@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 **/target/
+.local/
 contracts/evm/out/
 contracts/evm/cache/
 contracts/evm/broadcast/

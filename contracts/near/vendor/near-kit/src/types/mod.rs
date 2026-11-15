@@ -60,6 +60,7 @@ pub(crate) mod rpc;
 mod rpc_extra;
 mod transaction;
 mod units;
+mod universal_state_init;
 mod wait_level;
 
 pub use account::{AccountId, AccountIdRef, TryIntoAccountId};
@@ -71,8 +72,8 @@ pub use action::{
     FunctionCallPermission, GasKeyInfo, GlobalContractId, MAX_NONCES_FOR_GAS_KEY,
     NonDelegateAction, PublishMode, SignedDelegateAction, StakeAction, StateInit, StateInitExt,
     StateInitV1, TransferAction, TransferToGasKeyAction, TryIntoGlobalContractId,
-    UseGlobalContractAction, VersionedDelegateActionPayload, VersionedSignedDelegateAction,
-    WithdrawFromGasKeyAction,
+    UniversalStateInitAction, UseGlobalContractAction, VersionedDelegateActionPayload,
+    VersionedSignedDelegateAction, WithdrawFromGasKeyAction,
 };
 pub use block_reference::{BlockReference, Finality, SyncCheckpoint, TxExecutionStatus};
 pub use error::{
@@ -94,7 +95,7 @@ pub use key::{
 pub use network::ChainId;
 pub use rpc::{
     AccessKeyDetails, AccessKeyInfoView, AccessKeyListView, AccessKeyPermissionView, AccessKeyView,
-    AccountBalance, AccountContractView, AccountView, ActionReceiptData, ActionView,
+    AccountBalance, AccountContractView, AccountState, AccountView, ActionReceiptData, ActionView,
     BandwidthRequest, BandwidthRequestBitmap, BandwidthRequests, BandwidthRequestsV1, BlockEffects,
     BlockHeaderView, BlockView, ChunkHeaderView, CongestionInfoView, ContractCodeView,
     DataReceiptData, DataReceiverView, DelegateActionV2View, DelegateActionView, ExecutionMetadata,
@@ -117,6 +118,7 @@ pub use transaction::{
     TransactionNonce, TransactionV1, VersionedTransaction,
 };
 pub use units::{Gas, IntoGas, IntoNearToken, NearToken};
+pub use universal_state_init::{RawStateInit, UniversalStateInit, UniversalStateInitV1};
 pub use wait_level::{
     Executed, ExecutedOptimistic, Final, Included, IncludedFinal, Submitted, WaitLevel,
 };

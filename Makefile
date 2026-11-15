@@ -2,7 +2,7 @@ PYTHON ?= python3
 SEMGREP ?= semgrep
 GITLEAKS ?=
 
-.PHONY: lint test lint-near test-near build-near build-near-mock-signer install-near-sandbox test-near-sandbox lint-evm test-evm test-evm-anvil audit-evm audit-aderyn audit-semgrep audit-secrets ci
+.PHONY: lint test lint-near test-near build-near build-near-mock-signer install-near-sandbox test-near-sandbox lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-secrets ci
 
 lint:
 	$(PYTHON) -m compileall -q tests protocol
@@ -40,7 +40,7 @@ test-evm-anvil: lint-evm
 	PYTHONPATH=.:tests $(PYTHON) tests/evm_anvil_integration.py -v
 
 audit-evm:
-	cd contracts/evm && slither . --foundry-out-directory out
+	cd contracts/evm && slither . --foundry-out-directory out --fail-high
 
 # Keep the constructor nonpayable: accepting ETH is not part of this factory's API.
 # The upstream performance-only rule recommends payable constructors for gas savings.
@@ -49,11 +49,7 @@ audit-evm:
 audit-semgrep:
 	SEMGREP="$(SEMGREP)" bash scripts/audit-semgrep-pinned.sh
 
-audit-aderyn: lint-evm
-	cd contracts/evm && aderyn . --highs-only --output out/aderyn-high.json
-	$(PYTHON) -c 'import json, pathlib; report=json.loads(pathlib.Path("contracts/evm/out/aderyn-high.json").read_text()); count=report["issue_count"]["high"]; print(f"Aderyn high-severity findings: {count}"); raise SystemExit(count != 0)'
-
 audit-secrets:
 	GITLEAKS="$(GITLEAKS)" bash scripts/audit-gitleaks-pinned.sh
 
-ci: lint test lint-near test-near build-near test-near-sandbox lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-aderyn audit-secrets
+ci: lint test lint-near test-near build-near test-near-sandbox lint-evm test-evm test-evm-anvil audit-evm audit-semgrep audit-secrets

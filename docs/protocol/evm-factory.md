@@ -19,14 +19,13 @@
 
 This is development/test code, not a production factory, security audit, or deployment approval. Creation-code allowlisting is only as trustworthy as the authority that approves the hash. The prototype does not validate the component's source, governance semantics, vulnerabilities, project-specific authorization payload, or legal/economic rights. It also cannot inspect a project Safe/DAO's owners, threshold, modules, or upgrade/admin semantics; separately review those and confirm that the selected component makes project control durable before any deployment. A production design still needs reviewed binding between the human-approved NEAR request and all factory calldata, an appropriately governed configuration authority, audited component implementations, destination-chain controls, and independent contract review.
 
-The Foundry, Slither, and Aderyn tool versions are pinned under `contracts/evm/`; the Aderyn Linux archive is checksum-verified. Run from the repository root:
+The Foundry and Slither tool versions are pinned under `contracts/evm/`. Aderyn was retired upstream and its release binaries were withdrawn on November 13, 2026. Run from the repository root:
 
 ```sh
 make lint-evm
 make test-evm
 make audit-evm
 make audit-semgrep
-make audit-aderyn
 ```
 
-Slither and Aderyn run locally without network access; Semgrep fetches the public `p/smart-contracts` ruleset, with metrics and version checks disabled. The Semgrep gate excludes only its performance rule recommending a payable constructor: accepting ETH is outside this factory's API. Aderyn gates high-severity findings; inspect its generated `contracts/evm/out/aderyn-high.json` report when the gate fails. These automated checks are not an independent audit and do not establish deployment readiness.
+Slither runs locally without network access and fails on high-impact findings; Semgrep fetches the public `p/smart-contracts` ruleset, with metrics and version checks disabled. The Semgrep gate excludes only its performance rule recommending a payable constructor: accepting ETH is outside this factory's API. Slither replaces the retired Aderyn high-severity gate, though its detector coverage is not identical. These automated checks are not an independent audit and do not establish deployment readiness.

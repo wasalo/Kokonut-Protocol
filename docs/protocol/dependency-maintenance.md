@@ -71,6 +71,30 @@ PyPI still reports Semgrep `1.182.1` as its latest release on this check. Its pu
 
 This is a package-pair recheck, not a full dependency audit. The Python environment is resolved at install time from Semgrep metadata; the repository does not have a tracked Python lockfile. Keep these matches open for upstream-compatible updates and the independent review. No live activity or deployment is authorized by this update.
 
+## Current refresh — 2026-11-15
+
+The Rust toolchain is now pinned to `1.100.0`; cargo-near is `0.23.0`, Foundry is `1.9.0`, near-sdk is `5.30.2`, near-kit is `0.20.1`, near-sandbox is `0.4.1`, Semgrep is `1.185.0`, and the CI Python installer is `pip 26.3`.[65][66] Their exact release sources/checksums and the refreshed Cargo locks are pinned in the repository. The Debian snapshot used to build the Rust tools is `20261112T000000Z`.
+
+The updated NEAR contract lockfile contains 391 registry package/version pairs and two OSV matches. The Foundry source lock after its reviewed refresh contains 1,130 pairs and four matches. The cargo-near source lock after its refresh contains 658 pairs and five matches. These are separate tool and contract graphs; their counts are not a full audit and should not be added to a deployment risk score.
+
+The refresh removes the currently recorded high-severity `quick-xml` advisories by moving both pinned tool locks to `0.41.0`; RustSec lists `0.41.0` as fixed for the quadratic attribute-check denial of service and unbounded namespace-allocation denial of service.[52][53] The `zip` locks now resolve only to `9.6.0`, above GitHub's fixed version `9.0.5` for the critical dual-header archive advisory.[54]
+
+Foundry's bundled SQLite path previously resolved `rusqlite 0.38.0` / `libsqlite3-sys 0.36.0`, affected by CVE-2026-119375 when opening a crafted database and sibling WAL file. The pinned Foundry source now uses the reviewed MPP commit `fa567a699a70f58fd6852630db332f5443cef068`; it resolves `rusqlite 0.41.1` / `libsqlite3-sys 0.39.1`, which RustSec lists as patched.[55] The MPP commit is pinned by SHA and its narrow upstream diff was reviewed; it is not signed. CI verifies the signed Foundry source commit, then applies the checked-in lock/manifest patch and checks these versions before building.
+
+A fresh OSV pass also found newly recorded advisories matching Foundry's `zstd 0.13.3`, `zstd-safe 7.3.0`, and `rustix 1.1.5`. The reviewed lock refresh moves these to `zstd 0.13.4`, `zstd-safe 7.4.1`, and `rustix 1.1.6`, at or above the RustSec fixed versions.[79][80][81][82]
+
+The new vendor checks bind `symbolic-debuginfo 13.9.0`, `self_update 0.42.0`, and `email-address-parser 2.0.2` to their crates.io archive checksums and compare every retained file. The self-update compatibility patch preserves XML entity unescaping and adds a focused regression test. `email-address-parser` changes only its `quick-xml` build-dependency declaration. The cargo-near lock also updates its active `git2` dependency to `0.21.0`; the remaining `git2 0.20.4` OSV matches are reached only by the source tree's integration-test dev dependency, and both unsoundness advisories list `0.21.0` as patched.[56][57]
+
+Residual Cargo matches remain visible. The contract lock and Foundry graph both contain `crypto-bigint 0.5.5`, matching RustSec's timing-variability advisory; the Foundry binary reaches it through `elliptic-curve 0.13` / `p256 0.13`. RustSec lists `0.7.6` as fixed, but the current `elliptic-curve 0.13` line requires the incompatible `0.5` major line, so no override was forced.[58] The NEAR occurrence is confined to the host/unit-testing graph, while Foundry reaches it in its normal/build graph. The remaining `unsafe-libyaml`, `number_prefix`, `proc-macro-error`, `derivative`, `paste`, and `pin-utils` matches are unmaintained-package notices with no patched releases listed by RustSec.[59][60][61][62][63][64]
+
+The Python OSV recheck covered 52 resolved Protocol/Slither package-version pairs and returned zero matches. The isolated Semgrep environment covered 68 pairs and returned six **MODERATE** matches: four on `mcp 1.29.0` and two on `opentelemetry-api 1.37.0`.[67][68][69][70][71][72] Semgrep `1.185.0` pins `mcp==1.29.0` and constrains `opentelemetry-api` to `~=1.37.0`, so the advisory-fixed versions (`mcp 1.30.0` and OpenTelemetry API `1.45.1`/`1.45.2`) do not satisfy its published requirements.[66][67][68][69][70][71][72] CI runs Semgrep in an isolated environment and does not start an MCP or telemetry service; the package matches remain open until Semgrep publishes compatible requirements. The Python environments have no tracked full lockfile, so these counts describe the exact install snapshots checked on this date.
+
+Aderyn `0.6.8` was the latest tagged release, but its maintainer retired the project and withdrew its release binaries on November 13, 2026.[78] The CI download now returns 404, and the retained release tag/commit is unsigned. The Aderyn binary pin was removed. To preserve a high-impact blocker, the pinned Slither `0.11.6` audit now uses its supported `--fail-high` option; Slither and Semgrep remain active. Slither does not have identical detector coverage to Aderyn, so this is a tool replacement with a coverage difference, not parity. Reassess analyzer coverage when selecting a maintained replacement.
+
+The Gitleaks scanner remains a toolchain security residual. Its pinned `8.30.0` source manifest includes `golang.org/x/sys 0.30.0`, `golang.org/x/text 0.22.0`, `golang.org/x/crypto 0.35.0`, `ulikunitz/xz 0.5.12`, `nwaples/rardecode/v2 2.1.0`, and `klauspost/compress 1.17.11`; upstream issue reports identify these dependency lines in the `8.30.1` release as vulnerable.[73][74][75] The upstream `8.30.1` tag is also documented as not being an ancestor of `master`, with the maintainer acknowledging the release mistake; it still has open dependency CVE reports, so it was not substituted for the pinned release.[76][77] No clean, verifiable Gitleaks release was available on this check. Revisit the scanner pin when upstream publishes a corrected release.
+
+The current OSV query reports no Critical or High match in the three Cargo locks after the ZIP and XML updates. The Foundry cryptographic timing advisory remains security-relevant despite having no numeric CVSS score, the unmaintained-package notices remain open, and Semgrep's six Moderate matches remain unresolved. This dependency refresh is not the full Protocol, component-authority, or dependency audit required before any public/testnet deployment; no signing, broadcast, or deployment was performed.
+
 ## Sources
 
 [5] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
@@ -118,3 +142,35 @@ This is a package-pair recheck, not a full dependency audit. The Python environm
 [49] https://pypi.org/pypi/semgrep/json
 [50] https://api.osv.dev/v1/vulns/GHSA-84m7-p3x7-pcfv
 [51] https://api.osv.dev/v1/vulns/GHSA-xcq7-p3pf-p88h
+[52] https://rustsec.org/advisories/RUSTSEC-2026-0194.html
+[53] https://rustsec.org/advisories/RUSTSEC-2026-0195.html
+[54] https://github.com/advisories/GHSA-m665-v7pm-7grj
+[55] https://rustsec.org/advisories/RUSTSEC-2026-0459.html
+[56] https://rustsec.org/advisories/RUSTSEC-2026-0183.html
+[57] https://rustsec.org/advisories/RUSTSEC-2026-0184.html
+[58] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
+[59] https://rustsec.org/advisories/RUSTSEC-2024-0449.html
+[60] https://rustsec.org/advisories/RUSTSEC-2025-0119.html
+[61] https://rustsec.org/advisories/RUSTSEC-2024-0370.html
+[62] https://rustsec.org/advisories/RUSTSEC-2024-0388.html
+[63] https://rustsec.org/advisories/RUSTSEC-2024-0436.html
+[64] https://rustsec.org/advisories/RUSTSEC-2026-0441.html
+[65] https://pypi.org/project/pip/26.3/
+[66] https://pypi.org/pypi/semgrep/1.185.0/json
+[67] https://github.com/advisories/GHSA-5h93-6whr-6q8j
+[68] https://github.com/advisories/GHSA-84m7-p3x7-pcfv
+[69] https://github.com/advisories/GHSA-rwrf-2pqf-9j8j
+[70] https://github.com/advisories/GHSA-w4fh-qvv9-3v23
+[71] https://github.com/advisories/GHSA-mf5v-w3w3-f6cg
+[72] https://github.com/advisories/GHSA-xcq7-p3pf-p88h
+[73] https://github.com/gitleaks/gitleaks/blob/v8.30.0/go.mod
+[74] https://github.com/gitleaks/gitleaks/issues/2305
+[75] https://github.com/gitleaks/gitleaks/issues/2330
+[76] https://github.com/gitleaks/gitleaks/issues/2086
+[77] https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1
+
+[78] https://github.com/Cyfrin/aderyn/releases/tag/aderyn-v0.6.8
+[79] https://rustsec.org/advisories/RUSTSEC-2026-0391.html
+[80] https://rustsec.org/advisories/RUSTSEC-2026-0395.html
+[81] https://rustsec.org/advisories/RUSTSEC-2026-0406.html
+[82] https://rustsec.org/advisories/RUSTSEC-2026-0486.html

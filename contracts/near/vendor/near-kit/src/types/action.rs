@@ -7,10 +7,11 @@ use borsh::de::EnumExt as _;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::error::ParseAccountIdError;
+use crate::error::{ParseAccountIdError, UniversalStateInitError};
 
 use super::{
-    AccountId, CryptoHash, Gas, NearToken, PublicKey, Signature, TransactionNonce, TryIntoAccountId,
+    AccountId, CryptoHash, Gas, NearToken, PublicKey, RawStateInit, Signature, TransactionNonce,
+    TryIntoAccountId, UniversalStateInit,
 };
 
 /// NEP-616 deterministic account types, re-exported from the
@@ -222,7 +223,8 @@ impl AccessKey {
 /// 0 = CreateAccount, 1 = DeployContract, 2 = FunctionCall, 3 = Transfer,
 /// 4 = Stake, 5 = AddKey, 6 = DeleteKey, 7 = DeleteAccount, 8 = Delegate,
 /// 9 = DeployGlobalContract, 10 = UseGlobalContract, 11 = DeterministicStateInit,
-/// 12 = TransferToGasKey, 13 = WithdrawFromGasKey, 14 = DelegateV2
+/// 12 = TransferToGasKey, 13 = WithdrawFromGasKey, 14 = DelegateV2,
+/// 15 = UniversalStateInit
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum Action {
     /// Create a new account. (discriminant = 0)
@@ -255,6 +257,8 @@ pub enum Action {
     WithdrawFromGasKey(WithdrawFromGasKeyAction),
     /// Gas-key-capable delegate action (meta-transactions, NEP-611). (discriminant = 14)
     DelegateV2(Box<VersionedSignedDelegateAction>),
+    /// Create a `0u` universal account from its state init. (discriminant = 15)
+    UniversalStateInit(UniversalStateInitAction),
 }
 
 impl Action {
@@ -430,6 +434,34 @@ pub struct WithdrawFromGasKeyAction {
     pub public_key: PublicKey,
     /// Amount of NEAR to withdraw.
     pub amount: NearToken,
+}
+
+/// Create a `0u` universal account from its state init.
+///
+/// `state_init` is the borsh encoding of a [`UniversalStateInit`], carried
+/// verbatim: the receiver's `0u` account id commits to exactly these bytes,
+/// so they must not be re-encoded. Build one with
+/// [`Action::universal_state_init`]; decode one with
+/// [`decode_state_init`](Self::decode_state_init).
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct UniversalStateInitAction {
+    /// Borsh-encoded `UniversalStateInit` bytes.
+    pub state_init: Vec<u8>,
+    /// Amount to attach for the new account's storage staking.
+    pub deposit: NearToken,
+}
+
+impl UniversalStateInitAction {
+    /// The `0u` universal account id this action creates: SHA3-256 over the
+    /// carried `state_init` bytes, exactly as given.
+    pub fn derive_account_id(&self) -> AccountId {
+        super::universal_state_init::derive_universal_account_id(&self.state_init)
+    }
+
+    /// Decode the carried bytes leniently; see [`UniversalStateInit::from_raw_lenient`].
+    pub fn decode_state_init(&self) -> Result<UniversalStateInit, UniversalStateInitError> {
+        super::universal_state_init::decode_lenient(&self.state_init)
+    }
 }
 
 /// Delegate action for meta-transactions.
@@ -768,6 +800,34 @@ impl Action {
     pub fn state_init(state_init: StateInit, deposit: NearToken) -> Self {
         Self::DeterministicStateInit(DeterministicStateInitAction {
             state_init,
+            deposit,
+        })
+    }
+
+    /// Create a `0u` universal account from its state init (nearcore 2.14).
+    ///
+    /// Accepts a typed [`UniversalStateInit`] /
+    /// [`UniversalStateInitV1`](super::UniversalStateInitV1) (encoded
+    /// canonically), or a [`RawStateInit`] / `Vec<u8>` carried verbatim. The
+    /// transaction's receiver must be the derived account id; see
+    /// [`UniversalStateInitAction::derive_account_id`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use near_kit::*;
+    /// # use near_kit::protocol::{Action, UniversalStateInitV1};
+    /// # use near_kit::signer::PublicKey;
+    /// let key: PublicKey = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp".parse()?;
+    /// let action = Action::universal_state_init(
+    ///     UniversalStateInitV1::new().with_access_key(key),
+    ///     NearToken::from_millinear(1),
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn universal_state_init(state_init: impl Into<RawStateInit>, deposit: NearToken) -> Self {
+        Self::UniversalStateInit(UniversalStateInitAction {
+            state_init: state_init.into().into_bytes(),
             deposit,
         })
     }
@@ -1125,6 +1185,62 @@ mod tests {
         assert_eq!(
             bytes[0], 13,
             "WithdrawFromGasKey should have discriminant 13"
+        );
+    }
+
+    #[test]
+    fn test_universal_state_init_wire_format() {
+        let action = Action::UniversalStateInit(UniversalStateInitAction {
+            state_init: vec![0xaa, 0xbb, 0xcc],
+            deposit: NearToken::from_yoctonear(7),
+        });
+        let bytes = borsh::to_vec(&action).unwrap();
+        // discriminant 15, then state_init as a u32-length-prefixed byte
+        // vector (nearcore's `RawStateInit`), then the u128 deposit.
+        let mut expected = vec![15, 3, 0, 0, 0, 0xaa, 0xbb, 0xcc];
+        expected.extend_from_slice(&7u128.to_le_bytes());
+        assert_eq!(bytes, expected);
+        assert_eq!(borsh::from_slice::<Action>(&bytes).unwrap(), action);
+    }
+
+    #[test]
+    fn test_universal_state_init_constructor() {
+        use crate::types::{PublicKeyHandle, UniversalStateInitV1};
+
+        // nearcore 2.14-release `test_derive_universal_account_id` key-only vector.
+        let typed: UniversalStateInit = UniversalStateInitV1::new()
+            .with_access_key(PublicKeyHandle::MlDsa65Hash([0x11; 32]))
+            .into();
+        let raw = typed.to_raw();
+        let deposit = NearToken::from_yoctonear(7);
+
+        let Action::UniversalStateInit(action) = Action::universal_state_init(&typed, deposit)
+        else {
+            panic!("expected a UniversalStateInit action");
+        };
+        assert_eq!(action.state_init, raw.0);
+        assert_eq!(
+            action.derive_account_id().as_str(),
+            "0ux8te7g99f9kqzdtp9h4qnwt9aczpgayymmtbdc50w199rcw3at1g"
+        );
+        assert_eq!(action.decode_state_init().unwrap(), typed);
+
+        // Raw bytes are carried verbatim, even non-canonical ones, and the id
+        // is over them as given.
+        let mut unsorted = vec![0, 0, 2, 0, 0, 0];
+        for key in *b"ba" {
+            unsorted.extend_from_slice(&[1, 0, 0, 0, key, 0, 0, 0, 0]);
+        }
+        unsorted.extend_from_slice(&[0, 0, 0, 0]);
+        let Action::UniversalStateInit(action) =
+            Action::universal_state_init(unsorted.clone(), deposit)
+        else {
+            panic!("expected a UniversalStateInit action");
+        };
+        assert_eq!(action.state_init, unsorted);
+        assert_eq!(
+            action.derive_account_id(),
+            RawStateInit(unsorted).derive_account_id()
         );
     }
 

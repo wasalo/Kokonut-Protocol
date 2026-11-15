@@ -254,7 +254,8 @@ fn parse_keyring_credential(
 #[cfg(test)]
 mod tests {
     use super::*;
-   #[test]
+
+    #[test]
     fn test_parse_missing_private_key() {
         let json = r#"{
             "public_key": "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847"
