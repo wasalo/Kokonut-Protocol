@@ -95,6 +95,14 @@ The Gitleaks scanner remains a toolchain security residual. Its pinned `8.30.0` 
 
 The current OSV query reports no Critical or High match in the three Cargo locks after the ZIP and XML updates. The Foundry cryptographic timing advisory remains security-relevant despite having no numeric CVSS score, the unmaintained-package notices remain open, and Semgrep's six Moderate matches remain unresolved. This dependency refresh is not the full Protocol, component-authority, or dependency audit required before any public/testnet deployment; no signing, broadcast, or deployment was performed.
 
+### Follow-up verification — 2026-11-15
+
+The official Semgrep release page still lists `1.185.0` as latest, and its PyPI metadata still pins `mcp==1.29.0` and `opentelemetry-api~=1.37.0`. The compatible Semgrep release therefore remains affected by the documented Moderate matches; no independent transitive override was applied.[83][84]
+
+The Gitleaks Releases API still identifies `8.30.1` as latest. Its upstream CVE reports remain open, and the project discussion says fixes are being worked on in `master`; there is not yet a newer release artifact to pin. Keep the existing verified `8.30.0` pin and recheck before the next toolchain refresh.[85][86][87]
+
+The current RustSec records continue to list `crypto-bigint >=0.7.6` and `lru >=0.18.2` as the fixed lines, while `unsafe-libyaml` has no patched version. The affected NEAR/Foundry parent constraints do not admit safe overrides, so these findings remain tracked and must be revisited with compatible upstream releases.[88][89][90]
+
 ## Sources
 
 [5] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
@@ -174,3 +182,11 @@ The current OSV query reports no Critical or High match in the three Cargo locks
 [80] https://rustsec.org/advisories/RUSTSEC-2026-0395.html
 [81] https://rustsec.org/advisories/RUSTSEC-2026-0406.html
 [82] https://rustsec.org/advisories/RUSTSEC-2026-0486.html
+[83] https://github.com/semgrep/semgrep/releases
+[84] https://pypi.org/pypi/semgrep/1.185.0/json
+[85] https://api.github.com/repos/gitleaks/gitleaks/releases/latest
+[86] https://github.com/gitleaks/gitleaks/issues/2305
+[87] https://github.com/gitleaks/gitleaks/issues/2330
+[88] https://rustsec.org/advisories/RUSTSEC-2026-0387.html
+[89] https://rustsec.org/advisories/RUSTSEC-2026-0253.html
+[90] https://rustsec.org/advisories/RUSTSEC-2024-0449.html

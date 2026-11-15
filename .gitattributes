@@ -1,0 +1,6 @@
+# These vendored grammar bytes are checked against the pinned upstream archive.
+contracts/evm/vendor/email-address-parser/src/rfc5322.pest whitespace=-blank-at-eol
+
+# Unified diff patch files encode unchanged blank lines with a trailing space.
+contracts/evm/patches/*.patch whitespace=-blank-at-eol
+contracts/near/patches/*.patch whitespace=-blank-at-eol
