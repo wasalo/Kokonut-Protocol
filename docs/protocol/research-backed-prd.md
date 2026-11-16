@@ -2144,6 +2144,7 @@ For this repository checklist, `[x]` means implementation or tests exist at the 
 [x] Implement the testnet-gated NEAR Hub Chain Signatures request/callback path; no live signer client or E2E request is configured.
 [x] Enforce project/chain/purpose-scoped derivation-path policy.
 [x] Implement the testnet-only EVM adapter prototype (Base Sepolia and Gnosis Chiado profiles).
+[x] Add fail-closed two-endpoint RPC read cross-checks to environment-created EVM adapters (fake-provider and loopback HTTP tests, including a no-broadcast-on-disagreement check; endpoint independence and live behavior remain operational/audit gates).
 [x] Implement the local SQLite durable nonce manager (not a production shared-store design).
 [x] Implement transaction simulation (exercised with fake JSON-RPC).
 [x] Implement broadcast/finality/effect-verification paths (mocked RPC tests only; no live transaction sent).

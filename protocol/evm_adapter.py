@@ -61,12 +61,18 @@ class EvmNetworkConfig:
     rpc_url_env: str
     confirmations_required: int = 12
     testnet: bool = True
+    verification_rpc_url_env: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or self.chain_id not in _SUPPORTED_TESTNET_CHAIN_IDS or not self.testnet:
             raise ValueError("only the allowlisted testnet chain IDs are supported")
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.rpc_url_env):
             raise ValueError("RPC URL environment variable must be an uppercase identifier")
+        if self.verification_rpc_url_env is not None:
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.verification_rpc_url_env):
+                raise ValueError("verification RPC URL environment variable must be an uppercase identifier")
+            if self.verification_rpc_url_env == self.rpc_url_env:
+                raise ValueError("primary and verification RPC environment variables must be distinct")
         if self.confirmations_required < 1:
             raise ValueError("at least one fallback confirmation is required")
 
@@ -78,10 +84,27 @@ class EvmNetworkConfig:
         _validate_rpc_endpoint(value)
         return value
 
+    def rpc_urls(self, environ: Mapping[str, str] | None = None) -> tuple[str, str]:
+        source = os.environ if environ is None else environ
+        if self.verification_rpc_url_env is None:
+            raise ValueError("configure a separate verification RPC endpoint")
+        primary = self.rpc_url(source)
+        verification = source.get(self.verification_rpc_url_env, "")
+        if not verification:
+            raise ValueError(f"configure {self.verification_rpc_url_env} with an HTTP(S) JSON-RPC endpoint")
+        _validate_rpc_endpoint(verification)
+        if primary == verification:
+            raise ValueError("primary and verification RPC endpoints must be distinct")
+        return primary, verification
+
 
 TESTNETS = {
-    "base-sepolia": EvmNetworkConfig("Base Sepolia", 84532, "BASE_SEPOLIA_RPC_URL", 12),
-    "gnosis-chiado": EvmNetworkConfig("Gnosis Chiado", 10200, "GNOSIS_CHIADO_RPC_URL", 32),
+    "base-sepolia": EvmNetworkConfig(
+        "Base Sepolia", 84532, "BASE_SEPOLIA_RPC_URL", 12, verification_rpc_url_env="BASE_SEPOLIA_VERIFY_RPC_URL"
+    ),
+    "gnosis-chiado": EvmNetworkConfig(
+        "Gnosis Chiado", 10200, "GNOSIS_CHIADO_RPC_URL", 32, verification_rpc_url_env="GNOSIS_CHIADO_VERIFY_RPC_URL"
+    ),
 }
 
 
@@ -128,6 +151,48 @@ class JsonRpcClient:
         if "result" not in payload:
             raise JsonRpcError(method, "response omitted result")
         return payload["result"]
+
+
+class CrossCheckingJsonRpcClient:
+    """Cross-check adapter reads across two providers; send raw transactions only to primary."""
+
+    _READ_METHODS = frozenset(
+        {
+            "eth_chainId",
+            "eth_getBlockByNumber",
+            "eth_maxPriorityFeePerGas",
+            "eth_call",
+            "eth_estimateGas",
+            "eth_getTransactionCount",
+            "eth_getStorageAt",
+            "eth_getCode",
+            "eth_getTransactionReceipt",
+        }
+    )
+    _CONSERVATIVE_MAX_METHODS = frozenset({"eth_maxPriorityFeePerGas", "eth_estimateGas"})
+    _PRIMARY_ONLY_METHODS = frozenset({"eth_sendRawTransaction"})
+
+    def __init__(self, primary: Any, verifier: Any):
+        if primary is verifier:
+            raise ValueError("primary and verification RPC clients must be separate instances")
+        self._primary = primary
+        self._verifier = verifier
+
+    def call(self, method: str, params: list[Any]) -> Any:
+        if method in self._PRIMARY_ONLY_METHODS:
+            return self._primary.call(method, params)
+        if method not in self._READ_METHODS:
+            raise JsonRpcError(method, "method is not enabled for cross-checked RPC access")
+        try:
+            primary_result = self._primary.call(method, params)
+            verifier_result = self._verifier.call(method, params)
+        except Exception:
+            raise JsonRpcError(method, "one or more RPC providers failed") from None
+        if method in self._CONSERVATIVE_MAX_METHODS:
+            return hex(max(_quantity(primary_result, method), _quantity(verifier_result, method)))
+        if primary_result != verifier_result:
+            raise JsonRpcError(method, "RPC providers returned different results")
+        return primary_result
 
 
 def _quantity(value: object, field: str) -> int:
@@ -522,7 +587,9 @@ class EvmAdapter:
 
     @classmethod
     def from_env(cls, network: EvmNetworkConfig, nonce_manager: NonceManager, environ: Mapping[str, str] | None = None):
-        return cls(network, JsonRpcClient(network.rpc_url(environ)), nonce_manager)
+        primary_url, verification_url = network.rpc_urls(environ)
+        rpc = CrossCheckingJsonRpcClient(JsonRpcClient(primary_url), JsonRpcClient(verification_url))
+        return cls(network, rpc, nonce_manager)
 
     def assert_network(self) -> None:
         actual = _quantity(self.rpc.call("eth_chainId", []), "eth_chainId")

@@ -1,6 +1,12 @@
 # Testnet EVM adapter
 
-`protocol/evm_adapter.py` is the client-side destination adapter. It is restricted to the allowlisted Base Sepolia (chain ID `84532`) and Gnosis Chiado (chain ID `10200`) profiles; those identifiers match [Base’s `eth_chainId` reference](https://docs.base.org/base-chain/api-reference/ethereum-json-rpc-api/eth_chainId) and [Gnosis’s Chiado network page](https://docs.gnosischain.com/about/networks/chiado). It does not configure mainnet. RPC endpoints come from `BASE_SEPOLIA_RPC_URL` or `GNOSIS_CHIADO_RPC_URL`. HTTPS is required except for loopback development endpoints, and endpoint strings are omitted from RPC errors.
+`protocol/evm_adapter.py` is the client-side destination adapter. It is restricted to the allowlisted Base Sepolia (chain ID `84532`) and Gnosis Chiado (chain ID `10200`) profiles; those identifiers match [Base’s `eth_chainId` reference](https://docs.base.org/base-chain/api-reference/ethereum-json-rpc-api/eth_chainId) and [Gnosis’s Chiado network page](https://docs.gnosischain.com/about/networks/chiado). It does not configure mainnet. Environment-created adapters require two distinct RPC URLs: `BASE_SEPOLIA_RPC_URL` and `BASE_SEPOLIA_VERIFY_RPC_URL`, or `GNOSIS_CHIADO_RPC_URL` and `GNOSIS_CHIADO_VERIFY_RPC_URL`. HTTPS is required except for loopback development endpoints, and endpoint strings are omitted from RPC errors.
+
+## RPC cross-check behavior
+
+The environment adapter uses `CrossCheckingJsonRpcClient`. Its reviewed read-method allowlist sends each request to both configured endpoints and fails closed if a provider errors or the results differ. `eth_estimateGas` and `eth_maxPriorityFeePerGas` use the larger numeric result from the two endpoints, which remains subject to the approved transaction limits. `eth_sendRawTransaction` is sent only to the primary endpoint so the transaction is not intentionally broadcast twice. Methods outside the allowlist are rejected.
+
+Two different URL strings do not prove two independent providers. Operators must select providers with separate operational control planes and should treat shared upstreams, common infrastructure, or collusion as residual risks. Agreement is a cross-check, not consensus or proof that either provider is honest. These checks have unit coverage with fake providers and loopback HTTP fixtures; the local fixtures verify that a read disagreement prevents the adapter from broadcasting. They do not establish live-provider behavior or authorize live signing, broadcast, or deployment. Directly injected RPC clients remain available for isolated loopback fixtures.
 
 ## Bound execution flow
 

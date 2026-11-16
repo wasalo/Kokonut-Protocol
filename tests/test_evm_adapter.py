@@ -3,8 +3,10 @@ import os
 import sqlite3
 import stat
 import tempfile
+import threading
 import unittest
 from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import rlp
@@ -13,8 +15,11 @@ from eth_keys import keys
 
 from protocol.evm_adapter import (
     TESTNETS,
+    CrossCheckingJsonRpcClient,
     EvmAdapter,
     EvmNetworkConfig,
+    JsonRpcClient,
+    JsonRpcError,
     NonceManager,
     PreparedTransaction,
     encode_signed_eip1559,
@@ -62,6 +67,45 @@ class FakeRpc:
         return value
 
 
+class LoopbackJsonRpcServer:
+    """HTTP JSON-RPC fixture bound only to an ephemeral loopback port."""
+
+    def __init__(self, responder):
+        self.calls = []
+        self.responder = responder
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                request_size = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(request_size))
+                owner.calls.append(request)
+                status, payload = owner.responder(request)
+                encoded = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, _format, *_args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        self.url = f"http://127.0.0.1:{self._server.server_port}/"
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2)
+
+
+def _json_rpc_result(request, result):
+    return 200, {"jsonrpc": "2.0", "id": request["id"], "result": result}
+
+
 class EvmAdapterTests(unittest.TestCase):
     def test_network_config_rejects_mainnet_chain_ids(self):
         with self.assertRaisesRegex(ValueError, "allowlisted testnet"):
@@ -72,6 +116,38 @@ class EvmAdapterTests(unittest.TestCase):
         self.assertEqual(TESTNETS["gnosis-chiado"].chain_id, 10200)
         self.assertTrue(all(network.testnet for network in TESTNETS.values()))
 
+    def test_environment_adapter_requires_two_distinct_rpc_endpoints(self):
+        network = TESTNETS["base-sepolia"]
+        with self.assertRaisesRegex(ValueError, "BASE_SEPOLIA_VERIFY_RPC_URL"):
+            network.rpc_urls({"BASE_SEPOLIA_RPC_URL": "https://rpc-one.example/key"})
+        with self.assertRaisesRegex(ValueError, "must be distinct"):
+            network.rpc_urls(
+                {
+                    "BASE_SEPOLIA_RPC_URL": "https://rpc-one.example/key",
+                    "BASE_SEPOLIA_VERIFY_RPC_URL": "https://rpc-one.example/key",
+                }
+            )
+        urls = network.rpc_urls(
+            {
+                "BASE_SEPOLIA_RPC_URL": "https://rpc-one.example/key",
+                "BASE_SEPOLIA_VERIFY_RPC_URL": "https://rpc-two.example/key",
+            }
+        )
+        self.assertEqual(urls, ("https://rpc-one.example/key", "https://rpc-two.example/key"))
+
+    def test_environment_adapter_uses_cross_checking_rpc_client(self):
+        manager = NonceManager(":memory:")
+        self.addCleanup(manager.close)
+        adapter = EvmAdapter.from_env(
+            TESTNETS["base-sepolia"],
+            manager,
+            {
+                "BASE_SEPOLIA_RPC_URL": "https://rpc-one.example/key",
+                "BASE_SEPOLIA_VERIFY_RPC_URL": "https://rpc-two.example/key",
+            },
+        )
+        self.assertIsInstance(adapter.rpc, CrossCheckingJsonRpcClient)
+
     def test_rpc_endpoint_requires_tls_except_for_loopback(self):
         with self.assertRaisesRegex(ValueError, "loopback"):
             TESTNETS["base-sepolia"].rpc_url({"BASE_SEPOLIA_RPC_URL": "http://rpc.example"})
@@ -79,6 +155,213 @@ class EvmAdapterTests(unittest.TestCase):
             TESTNETS["base-sepolia"].rpc_url({"BASE_SEPOLIA_RPC_URL": "http://127.0.0.1:8545"}),
             "http://127.0.0.1:8545",
         )
+
+    def test_cross_checking_rpc_requires_agreement_for_reads(self):
+        primary = FakeRpc({"eth_chainId": "0x14a34"})
+        verifier = FakeRpc({"eth_chainId": "0x14a34"})
+        rpc = CrossCheckingJsonRpcClient(primary, verifier)
+
+        self.assertEqual(rpc.call("eth_chainId", []), "0x14a34")
+        self.assertEqual(len(primary.calls), 1)
+        self.assertEqual(len(verifier.calls), 1)
+
+    def test_cross_checking_rpc_fails_closed_on_read_disagreement(self):
+        rpc = CrossCheckingJsonRpcClient(
+            FakeRpc({"eth_chainId": "0x14a34"}),
+            FakeRpc({"eth_chainId": "0x1"}),
+        )
+
+        with self.assertRaisesRegex(JsonRpcError, "different results"):
+            rpc.call("eth_chainId", [])
+
+    def test_cross_checking_rpc_uses_conservative_estimates(self):
+        rpc = CrossCheckingJsonRpcClient(
+            FakeRpc({"eth_estimateGas": "0x5208", "eth_maxPriorityFeePerGas": "0x2"}),
+            FakeRpc({"eth_estimateGas": "0x5300", "eth_maxPriorityFeePerGas": "0x3"}),
+        )
+
+        self.assertEqual(rpc.call("eth_estimateGas", []), "0x5300")
+        self.assertEqual(rpc.call("eth_maxPriorityFeePerGas", []), "0x3")
+
+    def test_cross_checking_rpc_broadcasts_only_through_primary(self):
+        primary = FakeRpc({"eth_sendRawTransaction": "0x" + "ab" * 32})
+        verifier = FakeRpc({"eth_sendRawTransaction": RuntimeError("must not broadcast twice")})
+        rpc = CrossCheckingJsonRpcClient(primary, verifier)
+
+        self.assertEqual(rpc.call("eth_sendRawTransaction", ["0xdeadbeef"]), "0x" + "ab" * 32)
+        self.assertEqual(len(primary.calls), 1)
+        self.assertEqual(verifier.calls, [])
+
+    def test_cross_checking_rpc_rejects_unreviewed_methods(self):
+        primary = FakeRpc({})
+        verifier = FakeRpc({})
+        rpc = CrossCheckingJsonRpcClient(primary, verifier)
+
+        with self.assertRaisesRegex(JsonRpcError, "not enabled"):
+            rpc.call("eth_sendTransaction", [{"to": "0x"}])
+        self.assertEqual(primary.calls, [])
+        self.assertEqual(verifier.calls, [])
+
+    def test_cross_checking_rpc_redacts_provider_errors(self):
+        rpc = CrossCheckingJsonRpcClient(
+            FakeRpc({"eth_chainId": RuntimeError("https://rpc.example/sensitive-key")}),
+            FakeRpc({"eth_chainId": "0x14a34"}),
+        )
+
+        with self.assertRaises(JsonRpcError) as raised:
+            rpc.call("eth_chainId", [])
+        self.assertNotIn("sensitive-key", str(raised.exception))
+
+    def test_cross_checking_rpc_requires_separate_clients(self):
+        provider = FakeRpc({})
+        with self.assertRaisesRegex(ValueError, "separate instances"):
+            CrossCheckingJsonRpcClient(provider, provider)
+
+    def test_loopback_json_rpc_transport_cross_checks_matching_reads(self):
+        primary = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, "0x14a34"))
+        verifier = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, "0x14a34"))
+        self.addCleanup(primary.close)
+        self.addCleanup(verifier.close)
+        rpc = CrossCheckingJsonRpcClient(JsonRpcClient(primary.url), JsonRpcClient(verifier.url))
+
+        self.assertEqual(rpc.call("eth_chainId", []), "0x14a34")
+        self.assertEqual([request["method"] for request in primary.calls], ["eth_chainId"])
+        self.assertEqual([request["method"] for request in verifier.calls], ["eth_chainId"])
+
+    def test_loopback_json_rpc_transport_fails_closed_on_disagreement(self):
+        primary = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, "0x14a34"))
+        verifier = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, "0x1"))
+        self.addCleanup(primary.close)
+        self.addCleanup(verifier.close)
+        rpc = CrossCheckingJsonRpcClient(JsonRpcClient(primary.url), JsonRpcClient(verifier.url))
+
+        with self.assertRaisesRegex(JsonRpcError, "different results"):
+            rpc.call("eth_chainId", [])
+        self.assertEqual(len(primary.calls), 1)
+        self.assertEqual(len(verifier.calls), 1)
+
+    def test_loopback_json_rpc_transport_redacts_provider_failure(self):
+        primary = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, "0x14a34"))
+        verifier = LoopbackJsonRpcServer(
+            lambda request: (503, {"message": "provider-private-marker"})
+        )
+        self.addCleanup(primary.close)
+        self.addCleanup(verifier.close)
+        rpc = CrossCheckingJsonRpcClient(JsonRpcClient(primary.url), JsonRpcClient(verifier.url))
+
+        with self.assertRaises(JsonRpcError) as raised:
+            rpc.call("eth_chainId", [])
+        self.assertNotIn("provider-private-marker", str(raised.exception))
+        self.assertEqual(len(primary.calls), 1)
+        self.assertEqual(len(verifier.calls), 1)
+
+    def test_loopback_json_rpc_transport_sends_broadcast_to_primary_only(self):
+        transaction_hash = "0x" + "ab" * 32
+        primary = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, transaction_hash))
+        verifier = LoopbackJsonRpcServer(lambda request: _json_rpc_result(request, "unexpected"))
+        self.addCleanup(primary.close)
+        self.addCleanup(verifier.close)
+        rpc = CrossCheckingJsonRpcClient(JsonRpcClient(primary.url), JsonRpcClient(verifier.url))
+
+        self.assertEqual(rpc.call("eth_sendRawTransaction", ["0xdeadbeef"]), transaction_hash)
+        self.assertEqual([request["method"] for request in primary.calls], ["eth_sendRawTransaction"])
+        self.assertEqual(verifier.calls, [])
+
+    def test_adapter_does_not_broadcast_after_loopback_read_disagreement(self):
+        manager = NonceManager(":memory:")
+        self.addCleanup(manager.close)
+        sender = "0x" + keys.PrivateKey((1).to_bytes(32, "big")).public_key.to_canonical_address().hex()
+        warm_rpc = FakeRpc(
+            {
+                "eth_chainId": "0x14a34",
+                "eth_getTransactionCount": "0x0",
+                "eth_getBlockByNumber": lambda params: (
+                    {"baseFeePerGas": "0x1", "number": "0x10"}
+                    if params[0] == "latest"
+                    else {"number": "0x10", "hash": "0x" + "cc" * 32}
+                ),
+                "eth_maxPriorityFeePerGas": "0xf4240",
+                "eth_call": "0x",
+                "eth_estimateGas": "0x5208",
+            }
+        )
+        warm_adapter = EvmAdapter(TESTNETS["base-sepolia"], warm_rpc, manager)
+        record = {
+            "status": "Approved",
+            "action_hash": FIXTURE["expected_action_hash"],
+            "policy_hash": FIXTURE["policy_hash"],
+            "expires_at_ns": FIXTURE["expires_at_ns"],
+            "request": REQUEST,
+        }
+        warm_adapter.reserve_approved_nonce(
+            record,
+            CALLDATA,
+            active_policy=ACTIVE_POLICY,
+            near_block_timestamp_ns=1,
+            signer_address=sender,
+        )
+        digest = prepare_approved_eip1559_signing_payload(
+            record,
+            CALLDATA,
+            active_policy=ACTIVE_POLICY,
+            near_block_timestamp_ns=1,
+        )
+        signature = _chainsig_response(digest)
+        prepared = warm_adapter.prepare_approved_transaction(
+            record,
+            CALLDATA,
+            active_policy=ACTIVE_POLICY,
+            near_block_timestamp_ns=1,
+            signature_response=signature,
+            signer_address=sender,
+            expected_effect=EFFECT,
+        )
+
+        def matching_result(request):
+            method = request["method"]
+            if method == "eth_chainId":
+                result = "0x14a34"
+            elif method == "eth_getBlockByNumber":
+                result = {"baseFeePerGas": "0x1", "number": "0x10"}
+            elif method == "eth_maxPriorityFeePerGas":
+                result = "0xf4240"
+            elif method == "eth_call":
+                result = "0x"
+            elif method == "eth_estimateGas":
+                result = "0x5208"
+            else:
+                raise AssertionError(f"unexpected JSON-RPC method: {method}")
+            return _json_rpc_result(request, result)
+
+        primary = LoopbackJsonRpcServer(matching_result)
+
+        def verifier_result(request):
+            if request["method"] == "eth_call":
+                return _json_rpc_result(request, "0x01")
+            return matching_result(request)
+
+        verifier = LoopbackJsonRpcServer(verifier_result)
+        self.addCleanup(primary.close)
+        self.addCleanup(verifier.close)
+        adapter = EvmAdapter(
+            TESTNETS["base-sepolia"],
+            CrossCheckingJsonRpcClient(JsonRpcClient(primary.url), JsonRpcClient(verifier.url)),
+            manager,
+        )
+
+        with self.assertRaisesRegex(JsonRpcError, "different results"):
+            adapter.broadcast(
+                prepared,
+                record=record,
+                calldata_hex=CALLDATA,
+                active_policy=ACTIVE_POLICY,
+                near_block_timestamp_ns=1,
+                signature_response=signature,
+                signer_address=sender,
+                expected_effect=EFFECT,
+            )
+        self.assertFalse(any(request["method"] == "eth_sendRawTransaction" for request in primary.calls))
+        self.assertFalse(any(request["method"] == "eth_sendRawTransaction" for request in verifier.calls))
 
     def test_expected_effect_hash_is_canonical_and_matches_approved_request(self):
         reordered = dict(reversed(list(EFFECT.items())))
